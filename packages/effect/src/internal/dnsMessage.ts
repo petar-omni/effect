@@ -219,14 +219,18 @@ class MessageReader {
 const record = <T extends Dns.RecordType>(
   type: T,
   fields: { readonly [K in keyof Dns.RecordFields<T>]: Dns.RecordFields<T>[K] | undefined }
-): Dns.DnsRecord | undefined => Result.getOrUndefined(Dns.makeRecord(type, fields as Dns.RecordFields<T>))
+): Result.Result<Dns.DnsRecord, NetAddress.NetAddressError> => Dns.makeRecord(type, fields as Dns.RecordFields<T>)
 
 const exactLength = (reader: MessageReader, end: number, length: number, type: string): void => {
   if (end - reader.offset !== length) reader.fail(`${type} record data must be ${length} bytes`)
 }
 
-// Returns `undefined` for well-formed data that `Dns` cannot represent.
-const readData = (reader: MessageReader, type: number, end: number): Dns.DnsRecord | undefined => {
+// Returns `undefined` for types that `Dns` does not support.
+const readData = (
+  reader: MessageReader,
+  type: number,
+  end: number
+): Result.Result<Dns.DnsRecord, NetAddress.NetAddressError> | undefined => {
   switch (type) {
     case typeCodes.A:
       exactLength(reader, end, 4, "A")
@@ -361,11 +365,12 @@ export const decodeResponse = (bytes: Uint8Array): Result.Result<DnsClient.Respo
           reader.offset = end
           continue
         }
-        const data = readData(reader, type, end) ?? {
-          _tag: "Raw" as const,
-          type,
-          data: new Uint8Array(reader.bytes.subarray(end - length, end))
-        }
+        const decoded = readData(reader, type, end)
+        const data = decoded === undefined
+          ? { _tag: "Unknown" as const, type, data: new Uint8Array(reader.bytes.subarray(end - length, end)) }
+          : Result.isSuccess(decoded)
+          ? decoded.success
+          : reader.fail(decoded.failure.message, start)
         if (reader.offset !== end) reader.fail("record data does not match its length", start)
         records.push({
           owner,

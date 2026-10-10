@@ -28,15 +28,15 @@ import * as Host from "./Host.ts"
 import * as NetAddress from "./NetAddress.ts"
 
 /**
- * A record that cannot be represented as a `Dns.DnsRecord`, with its numeric
+ * A record of a type that `Dns.DnsRecord` does not support, with its numeric
  * type and undecoded data.
  *
  * @stability experimental
  * @category models
  * @since 4.0.0
  */
-export interface RawRecord {
-  readonly _tag: "Raw"
+export interface UnknownRecord {
+  readonly _tag: "Unknown"
   readonly type: number
   readonly data: Uint8Array
 }
@@ -48,7 +48,7 @@ export interface RawRecord {
  * @category models
  * @since 4.0.0
  */
-export interface ResourceRecord<D extends Dns.DnsRecord | RawRecord = Dns.DnsRecord | RawRecord> {
+export interface ResourceRecord<D extends Dns.DnsRecord | UnknownRecord = Dns.DnsRecord | UnknownRecord> {
   readonly owner: string
   readonly ttl: Duration.Duration
   readonly class: number
@@ -734,20 +734,6 @@ export const layerDns: Layer.Layer<Dns.Dns, never, DnsClient> = Layer.effect(
             record.data._tag === type ? [record.data as Dns.RecordFor<T>] : []
           )
           if (records.length > 0) return Effect.succeed(records)
-          const raw = atOwner.find((record) =>
-            record.data._tag === "Raw" && record.data.type === DnsMessage.typeCodes[type]
-          )
-          if (raw !== undefined) {
-            return Effect.fail(
-              new Dns.DnsError({
-                reason: "InvalidResponse",
-                method: "resolve",
-                hostname: name,
-                recordType: type,
-                cause: raw
-              })
-            )
-          }
           const alias = atOwner.find((record) => record.data._tag === "CNAME")?.data as Dns.Cname | undefined
           if (alias === undefined) {
             return target === undefined || response.rcode !== 0

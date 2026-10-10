@@ -955,7 +955,7 @@ describe("layerDns", () => {
    * point to when `chains` is set.
    */
   const staticClient = (options: {
-    readonly records: Record<string, ReadonlyArray<Dns.DnsRecord | DnsClient.RawRecord>>
+    readonly records: Record<string, ReadonlyArray<Dns.DnsRecord | DnsClient.UnknownRecord>>
     readonly search?: ReadonlyArray<string>
     readonly ndots?: number
     readonly noAaaa?: boolean
@@ -976,9 +976,9 @@ describe("layerDns", () => {
           const answer: Array<DnsClient.ResourceRecord> = []
           let owner: string | undefined = key
           for (let hops = 0; owner !== undefined && hops < 20; hops++) {
-            const records: ReadonlyArray<Dns.DnsRecord | DnsClient.RawRecord> = options.records[owner] ?? []
+            const records: ReadonlyArray<Dns.DnsRecord | DnsClient.UnknownRecord> = options.records[owner] ?? []
             for (const data of records) {
-              if (data._tag === type || data._tag === "CNAME" || data._tag === "Raw") {
+              if (data._tag === type || data._tag === "CNAME" || data._tag === "Unknown") {
                 answer.push({ owner: owner.toUpperCase(), ttl: Duration.seconds(60), class: 1, data })
               }
             }
@@ -1182,19 +1182,15 @@ describe("layerDns", () => {
       )
     }))
 
-  it.effect("resolves records and skips raw records", () =>
+  it.effect("resolves records and skips unknown records", () =>
     Effect.gen(function*() {
       const { dns } = staticClient({
         records: {
-          "example.test.": [ptr("good.example.test."), { _tag: "Raw", type: 12, data: Uint8Array.of(0) }],
-          "raw.test.": [{ _tag: "Raw", type: 12, data: Uint8Array.of(0) }],
-          "other.test.": [{ _tag: "Raw", type: 15, data: Uint8Array.of(0) }]
+          "example.test.": [ptr("good.example.test."), { _tag: "Unknown", type: 0xff00, data: Uint8Array.of(0) }],
+          "other.test.": [{ _tag: "Unknown", type: 0xff00, data: Uint8Array.of(0) }]
         }
       })
       assert.deepStrictEqual(yield* (yield* dns).resolve(name("example.test"), "PTR"), [ptr("good.example.test.")])
-      // A name whose records of the type cannot be represented is reported as an invalid response.
-      const invalid = yield* Effect.flip((yield* dns).resolve(name("raw.test"), "PTR"))
-      assert.deepStrictEqual([invalid.reason, invalid.recordType], ["InvalidResponse", "PTR"])
       assert.strictEqual((yield* Effect.flip((yield* dns).resolve(name("other.test"), "PTR"))).reason, "NotFound")
       const error = yield* Effect.flip((yield* dns).resolve(name("missing.test"), "PTR"))
       assert.strictEqual(error.reason, "NotFound")

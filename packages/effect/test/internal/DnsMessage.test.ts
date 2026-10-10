@@ -14,7 +14,7 @@ const hex = (input: string): Uint8Array =>
 const name = Host.domainNameFromStringUnsafe
 const ip = NetAddress.ipFromStringUnsafe
 
-const rr = <D extends Dns.DnsRecord | DnsClient.RawRecord>(owner: string, ttl: number, data: D) => ({
+const rr = <D extends Dns.DnsRecord | DnsClient.UnknownRecord>(owner: string, ttl: number, data: D) => ({
   owner,
   ttl: Duration.seconds(ttl),
   class: 1,
@@ -354,33 +354,18 @@ describe("DnsMessage", () => {
       )
     })
 
-    it("keeps unknown and unrepresentable records as raw data", () => {
-      const message = hex(`
-        0000 8000 0000 0007 0000 0000
-        01 61 00 ff00 0001 00000001 0003 010203  // private use type 65280
-        01 61 00 0101 0001 00000001 0005 00 02 612d 62  // CAA with a tag that is not alphanumeric
-        01 61 00 0101 0001 00000001 0005 00 02 6180 62  // CAA with a tag that is not ASCII
-        01 61 00 0010 0001 00000001 0000  // TXT without character strings
-        01 61 00 0034 0001 00000001 0003 030101  // TLSA without data
-        01 61 00 0005 0001 00000001 0007 05 636166c3a9 00  // CNAME to UTF-8 "café", not an IDNA name
-        01 61 00 000f 0001 00000001 000a 000a 06 6d61696c 2031 00  // MX to "mail 1"
-      `)
+    it("keeps records of unknown types as undecoded data", () => {
+      const message = hex(`0000 8000 0000 0001 0000 0000 01 61 00 ff00 0001 00000001 0003 010203`)
       assert.deepStrictEqual(decode(message).answer.map((record) => record.data), [
-        { _tag: "Raw", type: 0xff00, data: hex("010203") },
-        { _tag: "Raw", type: 257, data: hex("0002612d62") },
-        { _tag: "Raw", type: 257, data: hex("0002618062") },
-        { _tag: "Raw", type: 16, data: new Uint8Array(0) },
-        { _tag: "Raw", type: 52, data: hex("030101") },
-        { _tag: "Raw", type: 5, data: hex("05636166c3a900") },
-        { _tag: "Raw", type: 15, data: hex("000a066d61696c203100") }
+        { _tag: "Unknown", type: 0xff00, data: hex("010203") }
       ])
     })
 
-    it("copies raw data out of the message", () => {
+    it("copies unknown record data out of the message", () => {
       const message = hex(`0000 8000 0000 0001 0000 0000 01 61 00 ff00 0001 00000001 0001 01`)
       const [record] = decode(message).answer
       message[message.length - 1] = 2
-      assert.deepStrictEqual(record.data, { _tag: "Raw", type: 0xff00, data: hex("01") })
+      assert.deepStrictEqual(record.data, { _tag: "Unknown", type: 0xff00, data: hex("01") })
     })
 
     it("treats TTLs of 2^31 seconds or more as zero", () => {
@@ -455,6 +440,21 @@ describe("DnsMessage", () => {
         ),
         /question name is longer than 255 bytes/
       )
+    })
+
+    it("rejects record data that Dns cannot represent", () => {
+      for (
+        const [data, expected] of [
+          ["0101 0001 00000001 0005 00 02 612d 62", "invalid CAA record tag"], // tag that is not alphanumeric
+          ["0101 0001 00000001 0005 00 02 6180 62", "invalid CAA record tag"], // tag that is not ASCII
+          ["0010 0001 00000001 0000", "invalid TXT record chunks"], // no character strings
+          ["0034 0001 00000001 0003 030101", "invalid TLSA record data"], // no data
+          ["0005 0001 00000001 0007 05 636166c3a9 00", "invalid CNAME record target"], // UTF-8 "café"
+          ["000f 0001 00000001 000a 000a 06 6d61696c 2031 00", "invalid MX record exchange"] // "mail 1"
+        ]
+      ) {
+        assert.strictEqual(decodeError(hex(`0000 8000 0000 0001 0000 0000 01 61 00 ${data}`)), expected)
+      }
     })
 
     it("rejects record data that does not match its length", () => {
