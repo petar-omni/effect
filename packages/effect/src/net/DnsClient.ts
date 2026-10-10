@@ -204,15 +204,6 @@ export class Transport extends Context.Service<Transport, {
   }>
 }>()("effect/net/DnsClient/Transport") {}
 
-const nameServerAddresses = (
-  nameServers: Arr.NonEmptyReadonlyArray<NetAddress.IpAddressInput | NetAddress.InetAddressInput>
-): Arr.NonEmptyReadonlyArray<NetAddress.InetAddress> => {
-  if (nameServers.length === 0) {
-    throw new RangeError("DnsClient needs at least one name server")
-  }
-  return Arr.map(nameServers, (server) => Result.getOrThrow(Dns.nameServerFromInput(server)))
-}
-
 /**
  * Options for `makeTransportTcp`.
  *
@@ -239,8 +230,12 @@ export const makeTransportTcp = (
 ): Effect.Effect<Transport["Service"], never, Crypto.Crypto> =>
   Effect.gen(function*() {
     const crypto = yield* Crypto.Crypto
+    if (options.nameServers.length === 0) {
+      throw new RangeError("DnsClient needs at least one name server")
+    }
+    const servers = Arr.map(options.nameServers, (server) => Result.getOrThrow(Dns.nameServerFromInput(server)))
     return Transport.of({
-      servers: Arr.map(nameServerAddresses(options.nameServers), (server) => ({
+      servers: Arr.map(servers, (server) => ({
         send: Effect.fnUntraced(function*({ encode, fail, limit, matches }) {
           const id = yield* crypto.randomIntBetween(0, 0xffff)
           const payload = yield* limit(Effect.gen(function*() {
@@ -301,8 +296,9 @@ export const makeTransportUdp = (
       throw new RangeError(`DnsClient udpPayloadSize must be an integer from 512 to 65535, received ${udpPayloadSize}`)
     }
     const tcp = yield* makeTransportTcp(options)
+    const servers = Arr.map(options.nameServers, (server) => Result.getOrThrow(Dns.nameServerFromInput(server)))
     return Transport.of({
-      servers: Arr.map(nameServerAddresses(options.nameServers), (server, index) => ({
+      servers: Arr.map(servers, (server, index) => ({
         send: Effect.fnUntraced(function*(exchange) {
           const id = yield* crypto.randomIntBetween(0, 0xffff)
           const received = yield* exchange.limit(Effect.gen(function*() {
