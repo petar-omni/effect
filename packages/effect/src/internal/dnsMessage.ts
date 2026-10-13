@@ -367,7 +367,7 @@ export const decodeResponse = (bytes: Uint8Array): Result.Result<DnsClient.Respo
         }
         const decoded = readData(reader, type, end)
         const data = decoded === undefined
-          ? { _tag: "Unknown" as const, type, data: new Uint8Array(reader.bytes.subarray(end - length, end)) }
+          ? Dns.makeRecordUnsafe("Unknown", { type, data: reader.bytes.subarray(end - length, end) })
           : Result.isSuccess(decoded)
           ? decoded.success
           : reader.fail(decoded.failure.message, start)

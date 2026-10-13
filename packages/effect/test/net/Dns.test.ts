@@ -33,6 +33,18 @@ describe("Dns", () => {
       )
     })
 
+    it("makes records of types without their own record value", () => {
+      const record = Dns.makeRecordUnsafe("Unknown", { type: 0xff00, data: new Uint8Array([1, 2]) })
+      assert.isTrue(
+        Equal.equals(record, Dns.makeRecordUnsafe("Unknown", { type: 0xff00, data: new Uint8Array([1, 2]) }))
+      )
+      assert.isTrue(Result.isFailure(Dns.makeRecord("Unknown", { type: 0x10000, data: new Uint8Array() })))
+      assert.isTrue(Dns.isUnknownRecord(record))
+      assert.isFalse(Dns.isDnsRecord(record))
+      assert.isFalse(Dns.isRecordType("Unknown"))
+      assert.notInclude(Dns.recordTypes, "Unknown")
+    })
+
     it("copies TLSA data", () => {
       const data = new Uint8Array([0xab, 0xcd])
       const record = tlsa(data)
@@ -51,6 +63,14 @@ describe("Dns", () => {
         "PTR Office\\032Printer._ipp._tcp.local."
       )
       assert.strictEqual(Dns.formatRecord(tlsa(new Uint8Array([0x0a, 0xbc, 0xde]))), "TLSA 3 1 1 0ABCDE")
+      assert.strictEqual(
+        Dns.formatRecord(Dns.makeRecordUnsafe("Unknown", { type: 65280, data: new Uint8Array([0x0a, 0xbc]) })),
+        "TYPE65280 \\# 2 0ABC"
+      )
+      assert.strictEqual(
+        Dns.formatRecord(Dns.makeRecordUnsafe("Unknown", { type: 10, data: new Uint8Array() })),
+        "TYPE10 \\# 0"
+      )
     })
 
     it("implements equality and hashing", () => {
@@ -74,6 +94,7 @@ describe("Dns", () => {
 
     it("encodes and decodes JSON", () => {
       const codec = Schema.toCodecJson(Schema.DnsRecord)
+      const unknownCodec = Schema.toCodecJson(Schema.DnsUnknownRecord)
       const soa = Dns.makeRecordUnsafe("SOA", {
         primary: name("ns.example.com"),
         admin: "hostmaster.example.com",
@@ -101,6 +122,11 @@ describe("Dns", () => {
       assert.deepStrictEqual(Schema.encodeSync(codec)(record), tlsaJson)
       assert.isTrue(Equal.equals(Schema.decodeUnknownSync(codec)(tlsaJson), record))
       assert.throws(() => Schema.decodeUnknownSync(codec)({ ...tlsaJson, data: "" }))
+      const unknown = Dns.makeRecordUnsafe("Unknown", { type: 65280, data: new Uint8Array([0x0a, 0xbc]) })
+      const unknownJson = { _tag: "Unknown", type: 65280, data: "0abc" }
+      assert.deepStrictEqual(Schema.encodeSync(unknownCodec)(unknown), unknownJson)
+      assert.isTrue(Equal.equals(Schema.decodeUnknownSync(unknownCodec)(unknownJson), unknown))
+      assert.throws(() => Schema.decodeUnknownSync(codec)(unknownJson))
     })
   })
 

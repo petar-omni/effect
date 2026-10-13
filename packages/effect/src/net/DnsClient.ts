@@ -28,27 +28,13 @@ import * as Host from "./Host.ts"
 import * as NetAddress from "./NetAddress.ts"
 
 /**
- * A record of a type that `Dns.DnsRecord` does not support, with its numeric
- * type and undecoded data.
- *
- * @stability experimental
- * @category models
- * @since 4.0.0
- */
-export interface UnknownRecord {
-  readonly _tag: "Unknown"
-  readonly type: number
-  readonly data: Uint8Array
-}
-
-/**
  * A resource record of a DNS response section.
  *
  * @stability experimental
  * @category models
  * @since 4.0.0
  */
-export interface ResourceRecord<D extends Dns.DnsRecord | UnknownRecord = Dns.DnsRecord | UnknownRecord> {
+export interface ResourceRecord<D extends Dns.DnsRecord | Dns.Unknown = Dns.DnsRecord | Dns.Unknown> {
   readonly owner: string
   readonly ttl: Duration.Duration
   readonly class: number

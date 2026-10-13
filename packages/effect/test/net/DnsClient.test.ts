@@ -955,7 +955,7 @@ describe("layerDns", () => {
    * point to when `chains` is set.
    */
   const staticClient = (options: {
-    readonly records: Record<string, ReadonlyArray<Dns.DnsRecord | DnsClient.UnknownRecord>>
+    readonly records: Record<string, ReadonlyArray<Dns.DnsRecord | Dns.Unknown>>
     readonly search?: ReadonlyArray<string>
     readonly ndots?: number
     readonly noAaaa?: boolean
@@ -976,7 +976,7 @@ describe("layerDns", () => {
           const answer: Array<DnsClient.ResourceRecord> = []
           let owner: string | undefined = key
           for (let hops = 0; owner !== undefined && hops < 20; hops++) {
-            const records: ReadonlyArray<Dns.DnsRecord | DnsClient.UnknownRecord> = options.records[owner] ?? []
+            const records: ReadonlyArray<Dns.DnsRecord | Dns.Unknown> = options.records[owner] ?? []
             for (const data of records) {
               if (data._tag === type || data._tag === "CNAME" || data._tag === "Unknown") {
                 answer.push({ owner: owner.toUpperCase(), ttl: Duration.seconds(60), class: 1, data })
@@ -1159,7 +1159,7 @@ describe("layerDns", () => {
   it.effect("follows up to 8 CNAME records", () =>
     Effect.gen(function*() {
       const chain = (aliases: number) => {
-        const records: Record<string, ReadonlyArray<Dns.DnsRecord>> = {}
+        const records: Record<string, ReadonlyArray<Dns.DnsRecord | Dns.Unknown>> = {}
         for (let i = 0; i < aliases; i++) records[`a${i}.example.test.`] = [cname(`a${i + 1}.example.test.`)]
         records[`a${aliases}.example.test.`] = [a("192.0.2.1")]
         return staticClient({ records })
@@ -1186,8 +1186,11 @@ describe("layerDns", () => {
     Effect.gen(function*() {
       const { dns } = staticClient({
         records: {
-          "example.test.": [ptr("good.example.test."), { _tag: "Unknown", type: 0xff00, data: Uint8Array.of(0) }],
-          "other.test.": [{ _tag: "Unknown", type: 0xff00, data: Uint8Array.of(0) }]
+          "example.test.": [
+            ptr("good.example.test."),
+            Dns.makeRecordUnsafe("Unknown", { type: 0xff00, data: Uint8Array.of(0) })
+          ],
+          "other.test.": [Dns.makeRecordUnsafe("Unknown", { type: 0xff00, data: Uint8Array.of(0) })]
         }
       })
       assert.deepStrictEqual(yield* (yield* dns).resolve(name("example.test"), "PTR"), [ptr("good.example.test.")])

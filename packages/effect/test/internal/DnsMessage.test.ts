@@ -14,7 +14,7 @@ const hex = (input: string): Uint8Array =>
 const name = Host.domainNameFromStringUnsafe
 const ip = NetAddress.ipFromStringUnsafe
 
-const rr = <D extends Dns.DnsRecord | DnsClient.UnknownRecord>(owner: string, ttl: number, data: D) => ({
+const rr = <D extends Dns.DnsRecord | Dns.Unknown>(owner: string, ttl: number, data: D) => ({
   owner,
   ttl: Duration.seconds(ttl),
   class: 1,
@@ -357,7 +357,7 @@ describe("DnsMessage", () => {
     it("keeps records of unknown types as undecoded data", () => {
       const message = hex(`0000 8000 0000 0001 0000 0000 01 61 00 ff00 0001 00000001 0003 010203`)
       assert.deepStrictEqual(decode(message).answer.map((record) => record.data), [
-        { _tag: "Unknown", type: 0xff00, data: hex("010203") }
+        Dns.makeRecordUnsafe("Unknown", { type: 0xff00, data: hex("010203") })
       ])
     })
 
@@ -365,7 +365,7 @@ describe("DnsMessage", () => {
       const message = hex(`0000 8000 0000 0001 0000 0000 01 61 00 ff00 0001 00000001 0001 01`)
       const [record] = decode(message).answer
       message[message.length - 1] = 2
-      assert.deepStrictEqual(record.data, { _tag: "Unknown", type: 0xff00, data: hex("01") })
+      assert.deepStrictEqual(record.data, Dns.makeRecordUnsafe("Unknown", { type: 0xff00, data: hex("01") }))
     })
 
     it("treats TTLs of 2^31 seconds or more as zero", () => {

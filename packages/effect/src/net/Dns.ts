@@ -34,7 +34,7 @@ const RecordTypeId = "~effect/net/Dns/DnsRecord" as const
 // Records
 // =============================================================================
 
-interface RecordProto<Tag extends RecordType> extends Equal.Equal, Hash.Hash, Inspectable.Inspectable {
+interface RecordProto<Tag extends string> extends Equal.Equal, Hash.Hash, Inspectable.Inspectable {
   readonly _tag: Tag
   readonly [RecordTypeId]: typeof RecordTypeId
 }
@@ -232,6 +232,24 @@ export interface Txt extends RecordProto<"TXT"> {
 }
 
 /**
+ * A record of a type without its own record value, with its numeric type and
+ * undecoded data.
+ *
+ * **Details**
+ *
+ * `Unknown` records are not part of `DnsRecord` or `recordTypes`, and cannot be
+ * queried with `resolve`.
+ *
+ * @stability experimental
+ * @category models
+ * @since 4.0.0
+ */
+export interface Unknown extends RecordProto<"Unknown"> {
+  readonly type: number
+  readonly data: Uint8Array
+}
+
+/**
  * Any supported DNS record value.
  *
  * **Details**
@@ -276,7 +294,7 @@ export type RecordType =
  * @category models
  * @since 4.0.0
  */
-export type RecordFor<T extends RecordType> = Extract<DnsRecord, { readonly _tag: T }>
+export type RecordFor<T extends RecordType | "Unknown"> = Extract<DnsRecord | Unknown, { readonly _tag: T }>
 
 /**
  * The fields of a record type, without its `_tag`.
@@ -286,7 +304,8 @@ export type RecordFor<T extends RecordType> = Extract<DnsRecord, { readonly _tag
  * @category models
  * @since 4.0.0
  */
-export type RecordFields<T extends RecordType> = T extends RecordType ? Omit<RecordFor<T>, keyof RecordProto<T>>
+export type RecordFields<T extends RecordType | "Unknown"> = T extends RecordType | "Unknown"
+  ? Omit<RecordFor<T>, keyof RecordProto<T>>
   : never
 
 const isUint8 = (u: unknown): boolean => Number.isInteger(u) && (u as number) >= 0 && (u as number) <= 0xff
@@ -298,7 +317,7 @@ const isTimer = (u: unknown): boolean =>
   Duration.isDuration(u) && Duration.isFinite(u) && isUint32(Duration.toSeconds(u))
 
 const recordFields: {
-  readonly [K in RecordType]: { readonly [F in keyof RecordFields<K>]-?: (u: unknown) => boolean }
+  readonly [K in RecordType | "Unknown"]: { readonly [F in keyof RecordFields<K>]-?: (u: unknown) => boolean }
 } = {
   A: {
     address: NetAddress.isIpv4Address
@@ -355,6 +374,10 @@ const recordFields: {
   },
   TXT: {
     chunks: (u) => Array.isArray(u) && u.length > 0 && u.every(isString)
+  },
+  Unknown: {
+    type: isUint16,
+    data: (u) => u instanceof Uint8Array
   }
 }
 
@@ -365,7 +388,9 @@ const recordFields: {
  * @category constants
  * @since 4.0.0
  */
-export const recordTypes: Arr.NonEmptyReadonlyArray<RecordType> = Object.keys(recordFields) as Array<any> as any
+export const recordTypes: Arr.NonEmptyReadonlyArray<RecordType> = Object.keys(recordFields).filter((type) =>
+  type !== "Unknown"
+) as Array<any> as any
 
 /**
  * Returns `true` when a value is a supported record type.
@@ -376,6 +401,9 @@ export const recordTypes: Arr.NonEmptyReadonlyArray<RecordType> = Object.keys(re
  */
 export const isRecordType = (u: unknown): u is RecordType => recordTypes.includes(u as RecordType)
 
+const recordTag = (u: unknown): unknown =>
+  hasProperty(u, RecordTypeId) ? (u as { readonly _tag?: unknown })._tag : undefined
+
 /**
  * Returns `true` when a value is a DNS record.
  *
@@ -383,22 +411,31 @@ export const isRecordType = (u: unknown): u is RecordType => recordTypes.include
  * @category guards
  * @since 4.0.0
  */
-export const isDnsRecord = (u: unknown): u is DnsRecord => hasProperty(u, RecordTypeId)
+export const isDnsRecord = (u: unknown): u is DnsRecord => isRecordType(recordTag(u))
+
+/**
+ * Returns `true` when a value is an `Unknown` record.
+ *
+ * @stability experimental
+ * @category guards
+ * @since 4.0.0
+ */
+export const isUnknownRecord = (u: unknown): u is Unknown => recordTag(u) === "Unknown"
 
 const RecordPrototype = {
   ...Inspectable.BaseProto,
   [RecordTypeId]: RecordTypeId,
-  [Equal.symbol](this: DnsRecord, that: Equal.Equal): boolean {
-    return isDnsRecord(that) && that._tag === this._tag &&
+  [Equal.symbol](this: DnsRecord | Unknown, that: Equal.Equal): boolean {
+    return hasProperty(that, RecordTypeId) && (that as DnsRecord | Unknown)._tag === this._tag &&
       Object.keys(this).every((key) => Equal.equals((this as any)[key], (that as any)[key]))
   },
-  [Hash.symbol](this: DnsRecord): number {
+  [Hash.symbol](this: DnsRecord | Unknown): number {
     return Hash.structureKeys(this, Object.keys(this))
   },
-  toString(this: DnsRecord): string {
+  toString(this: DnsRecord | Unknown): string {
     return formatRecord(this)
   },
-  toJSON(this: DnsRecord): unknown {
+  toJSON(this: DnsRecord | Unknown): unknown {
     return { ...this }
   }
 }
@@ -413,8 +450,9 @@ const RecordPrototype = {
  * and ports must be 16-bit unsigned integers, the SOA serial and timers must be
  * 32-bit unsigned integers (the timers in whole seconds), the TLSA fields must
  * be 8-bit unsigned integers with non-empty `data`, which is copied, TXT
- * records need at least one chunk, and CAA property tags must be alphanumeric.
- * Fields that do not belong to the record type are ignored.
+ * records need at least one chunk, CAA property tags must be alphanumeric, and
+ * `Unknown` records need a 16-bit type, with their data copied. Fields that do
+ * not belong to the record type are ignored.
  *
  * **Example** (Creating a service record)
  *
@@ -435,11 +473,11 @@ const RecordPrototype = {
  * @category constructors
  * @since 4.0.0
  */
-export const makeRecord = <T extends RecordType>(
+export const makeRecord = <T extends RecordType | "Unknown">(
   type: T,
   fields: RecordFields<T>
 ): Result.Result<RecordFor<T>, NetAddress.NetAddressError> => {
-  if (!isRecordType(type)) {
+  if (!isRecordType(type) && type !== "Unknown") {
     return Result.fail(new NetAddress.NetAddressError({ input: type, message: "unknown DNS record type" }))
   }
   const input: Record<string, unknown> = typeof fields === "object" && fields !== null ? fields : {}
@@ -469,7 +507,7 @@ export const makeRecord = <T extends RecordType>(
  * @category unsafe
  * @since 4.0.0
  */
-export const makeRecordUnsafe = <T extends RecordType>(type: T, fields: RecordFields<T>): RecordFor<T> =>
+export const makeRecordUnsafe = <T extends RecordType | "Unknown">(type: T, fields: RecordFields<T>): RecordFor<T> =>
   Result.getOrThrow(makeRecord(type, fields))
 
 const encoder = new TextEncoder()
@@ -524,7 +562,7 @@ const formatName = (text: string): string => {
  * @category encoding
  * @since 4.0.0
  */
-export const formatRecord = (self: DnsRecord): string => {
+export const formatRecord = (self: DnsRecord | Unknown): string => {
   switch (self._tag) {
     case "A":
     case "AAAA":
@@ -553,6 +591,10 @@ export const formatRecord = (self: DnsRecord): string => {
       return `TLSA ${self.certUsage} ${self.selector} ${self.matchingType} ${Hex.encode(self.data).toUpperCase()}`
     case "TXT":
       return `TXT ${self.chunks.map(quote).join(" ")}`
+    case "Unknown":
+      return `TYPE${self.type} \\# ${self.data.length}${
+        self.data.length > 0 ? ` ${Hex.encode(self.data).toUpperCase()}` : ""
+      }`
   }
 }
 

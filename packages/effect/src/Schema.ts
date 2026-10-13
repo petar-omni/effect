@@ -13855,11 +13855,11 @@ const dnsSeconds = dnsUint32.pipe(decodeTo(
 
 // Each record type is an opaque value whose JSON form is a plain object tagged
 // by record type, such as `{ "_tag": "MX", "exchange": "mail.example.com", "priority": 10 }`.
-const dnsRecordOfType = <T extends Dns_.RecordType>(
+const dnsRecordOfType = <T extends Dns_.RecordType | "Unknown">(
   type: T,
   fields: { readonly [K in keyof Dns_.RecordFields<T>]-?: Codec<Dns_.RecordFields<T>[K], unknown> }
 ) =>
-  declare((u): u is Dns_.RecordFor<T> => Dns_.isDnsRecord(u) && u._tag === type, {
+  declare((u): u is Dns_.RecordFor<T> => (Dns_.isDnsRecord(u) || Dns_.isUnknownRecord(u)) && u._tag === type, {
     identifier: `Dns${type.charAt(0)}${type.slice(1).toLowerCase()}Record`,
     toCodecJson: () => {
       const json = TaggedStruct(type, fields)
@@ -14157,6 +14157,30 @@ export interface DnsTxtRecord extends declare<Dns_.Txt> {
  * @since 4.0.0
  */
 export const DnsTxtRecord: DnsTxtRecord = dnsRecordOfType("TXT", { chunks: NonEmptyArray(String) })
+
+/**
+ * Type-level representation of {@link DnsUnknownRecord}.
+ *
+ * @stability experimental
+ * @category models
+ * @since 4.0.0
+ */
+export interface DnsUnknownRecord extends declare<Dns_.Unknown> {
+  readonly "Rebuild": DnsUnknownRecord
+}
+
+/**
+ * Schema for already-constructed DNS records of a type without its own record
+ * value.
+ *
+ * @stability experimental
+ * @category schemas
+ * @since 4.0.0
+ */
+export const DnsUnknownRecord: DnsUnknownRecord = dnsRecordOfType("Unknown", {
+  type: dnsUint16,
+  data: Uint8ArrayFromHex
+})
 
 /**
  * Type-level representation of {@link DnsRecord}.
