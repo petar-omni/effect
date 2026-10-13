@@ -517,6 +517,70 @@ describe("WorkflowEngine", () => {
       }).pipe(Effect.provide(FailingLayer.pipe(Layer.provideMerge(WorkflowEngine.layerMemory))))
     }))
 
+  for (const scenario of ["child completion", "parent interruption"] as const) {
+    it.effect(`layerMemory unlinks a detached child from its parent on ${scenario}`, () =>
+      Effect.gen(function*() {
+        let parentRuns = 0
+        const ParentGate = DurableDeferred.make(`WorkflowEngine/DetachedParentGate/${scenario}`)
+        const ChildGate = DurableDeferred.make(`WorkflowEngine/DetachedChildGate/${scenario}`)
+        const Parent = Workflow.make(`WorkflowEngine/DetachedParent/${scenario}`, {
+          payload: {},
+          idempotencyKey: () => "parent"
+        })
+        const Child = Workflow.make(`WorkflowEngine/DetachedChild/${scenario}`, {
+          payload: {},
+          idempotencyKey: () => "child"
+        })
+        const ParentLayer = Parent.toLayer(Effect.fnUntraced(function*() {
+          parentRuns++
+          yield* Child.execute({}, { discard: true, detached: true })
+          yield* DurableDeferred.await(ParentGate)
+        }))
+        const ChildLayer = Child.toLayer(() => DurableDeferred.await(ChildGate))
+        yield* Effect.gen(function*() {
+          const executionId = yield* Parent.execute({}, { discard: true })
+          const childId = yield* Child.executionId({})
+          let result = yield* Parent.poll(executionId)
+          while (Option.isNone(result) || result.value._tag !== "Suspended") {
+            yield* Effect.yieldNow
+            result = yield* Parent.poll(executionId)
+          }
+
+          if (scenario === "parent interruption") {
+            yield* Parent.interrupt(executionId)
+            while (Option.isNone(result) || result.value._tag !== "Complete") {
+              yield* Effect.yieldNow
+              result = yield* Parent.poll(executionId)
+            }
+          }
+          const runsBeforeChild = parentRuns
+          yield* DurableDeferred.succeed(ChildGate, {
+            token: DurableDeferred.tokenFromExecutionId(ChildGate, { workflow: Child, executionId: childId }),
+            value: void 0
+          })
+          let child = yield* Child.poll(childId)
+          while (Option.isNone(child) || child.value._tag !== "Complete") {
+            yield* Effect.yieldNow
+            child = yield* Child.poll(childId)
+          }
+          for (let i = 0; i < 100; i++) yield* Effect.yieldNow
+
+          assert.deepStrictEqual(child.value, new Workflow.Complete({ exit: Exit.void }))
+          assert.strictEqual(parentRuns, runsBeforeChild, "a detached child must not wake its parent")
+        }).pipe(
+          Effect.provide(Layer.mergeAll(ParentLayer, ChildLayer).pipe(Layer.provideMerge(WorkflowEngine.layerMemory)))
+        )
+      }))
+  }
+
+  it.effect("layerMemory rejects detached without discard", () =>
+    Effect.gen(function*() {
+      const exit = yield* Effect.exit(
+        IncrementWorkflow.execute({ value: 1 }, { detached: true } as any)
+      )
+      assert(Exit.hasDies(exit), "detached requires discard")
+    }).pipe(Effect.provide(IncrementWorkflowLayer.pipe(Layer.provideMerge(WorkflowEngine.layerMemory)))))
+
   for (const mode of ["failure", "interruption"] as const) {
     it.effect(`layerMemory releases a pending child registration on ${mode}`, () =>
       Effect.gen(function*() {
