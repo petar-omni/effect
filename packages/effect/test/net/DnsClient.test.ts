@@ -4,6 +4,7 @@ import * as Base64Url from "effect/encoding/Base64Url"
 import * as Hex from "effect/encoding/Hex"
 import * as HttpClient from "effect/http/HttpClient"
 import * as HttpClientError from "effect/http/HttpClientError"
+import * as HttpClientRequest from "effect/http/HttpClientRequest"
 import * as HttpClientResponse from "effect/http/HttpClientResponse"
 import * as DnsMessage from "effect/internal/dnsMessage"
 import * as Dns from "effect/net/Dns"
@@ -39,11 +40,12 @@ const response = (options: {
   readonly rcode?: number | undefined
   readonly truncated?: boolean | undefined
   readonly isResponse?: boolean | undefined
+  readonly recursionAvailable?: boolean | undefined
   readonly answers?: number | undefined
 }): Uint8Array => {
   const answers = options.answers ?? 0
-  const flags = (options.isResponse === false ? 0 : 0x8000) | 0x0180 | (options.truncated ? 0x0200 : 0) |
-    (options.rcode ?? 0)
+  const flags = (options.isResponse === false ? 0 : 0x8000) | (options.recursionAvailable === false ? 0x0100 : 0x0180) |
+    (options.truncated ? 0x0200 : 0) | (options.rcode ?? 0)
   const owner = options.question?.[0] ?? "example.test"
   return Uint8Array.from([
     ...u16(options.id),
@@ -387,6 +389,27 @@ describe("DnsClient", () => {
       assert.strictEqual(network.requests.length, 1)
     }))
 
+  it.effect("tries the next name server after a referral without recursion", () =>
+    Effect.gen(function*() {
+      const network = fakeNetwork((request) =>
+        request.server === primary
+          ? [answer(request, { recursionAvailable: false, answers: 0 })]
+          : [answer(request)]
+      )
+      const exit = yield* run(udpTransport(network))
+      assert.strictEqual(Exit.isSuccess(exit) ? exit.value.answer.length : 0, 1)
+      assert.strictEqual(network.requests.length, 2)
+      const lame = fakeNetwork((request) => [answer(request, { recursionAvailable: false, answers: 0 })])
+      assert.strictEqual(reasonOf(yield* run(udpTransport(lame), { attempts: 1 })), "Refused")
+      // Answers, and queries without recursion, are accepted.
+      const answered = fakeNetwork((request) => [answer(request, { recursionAvailable: false })])
+      assert.isTrue(Exit.isSuccess(yield* run(udpTransport(answered))))
+      const client = yield* DnsClient.make().pipe(Effect.provideServiceEffect(DnsClient.Transport, udpTransport(lame)))
+      const fiber = yield* Effect.forkChild(client.query(name("example.test"), "A", { recursionDesired: false }))
+      yield* TestClock.adjust("1 minute")
+      assert.isTrue(Exit.isSuccess(yield* Fiber.await(fiber)))
+    }))
+
   it.effect("reports malformed responses", () =>
     Effect.gen(function*() {
       const network = fakeNetwork((request) => {
@@ -512,6 +535,17 @@ describe("DnsClient", () => {
       assert.isFalse(network.requests[0].header.flags.recursionDesired)
     }))
 
+  it.effect("reports queries of types that are not record types as unsupported", () =>
+    Effect.gen(function*() {
+      const network = fakeNetwork((request) => [answer(request)])
+      const client = yield* DnsClient.make().pipe(
+        Effect.provideServiceEffect(DnsClient.Transport, udpTransport(network))
+      )
+      const error = yield* Effect.flip(client.query(name("example.test."), "UNKNOWN" as Dns.RecordType))
+      assert.strictEqual(error.reason, "Unsupported")
+      assert.strictEqual(network.requests.length, 0)
+    }))
+
   it.effect("rejects invalid options when the service is created", () =>
     Effect.gen(function*() {
       const network = fakeNetwork(() => [])
@@ -613,6 +647,7 @@ describe("makeTransportHttps", () => {
   interface HttpReply {
     readonly status?: number | undefined
     readonly contentType?: string | undefined
+    readonly headers?: Record<string, string> | undefined
     readonly payload?: Uint8Array | undefined
   }
 
@@ -657,7 +692,7 @@ describe("makeTransportHttps", () => {
             request,
             new Response(reply.payload as Uint8Array<ArrayBuffer> | undefined ?? null, {
               status: reply.status ?? 200,
-              headers: { "content-type": reply.contentType ?? "application/dns-message" }
+              headers: { "content-type": reply.contentType ?? "application/dns-message", ...reply.headers }
             })
           ))
         })
@@ -671,8 +706,8 @@ describe("makeTransportHttps", () => {
 
   const runHttps = (
     http: ReturnType<typeof fakeHttp>,
-    { method, urls, ...options }: Partial<DnsClient.TransportHttpsOptions> & DnsClient.MakeOptions = {}
-  ) => run(httpsTransport(http, { method, ...(urls === undefined ? {} : { urls }) }), options)
+    { method, transformClient, urls, ...options }: Partial<DnsClient.TransportHttpsOptions> & DnsClient.MakeOptions = {}
+  ) => run(httpsTransport(http, { method, transformClient, ...(urls === undefined ? {} : { urls }) }), options)
 
   // The padded query for example.test. A with ID 0 and recursion desired.
   const paddedQuery = Result.getOrThrow(Hex.decode(
@@ -767,6 +802,28 @@ describe("makeTransportHttps", () => {
         contentType: "Application/DNS-Message; charset=binary"
       }))
       assert.isTrue(Exit.isSuccess(yield* runHttps(http)))
+    }))
+
+  it.effect("sends requests with the transformed client", () =>
+    Effect.gen(function*() {
+      const http = fakeHttp((request) => answer(request))
+      const transformClient = HttpClient.mapRequest(HttpClientRequest.setHeader("authorization", "Bearer token"))
+      assert.isTrue(Exit.isSuccess(yield* runHttps(http, { transformClient })))
+      assert.strictEqual(http.requests[0].headers.authorization, "Bearer token")
+      assert.strictEqual(http.requests[0].headers.accept, "application/dns-message")
+    }))
+
+  it.effect("rejects responses longer than 65535 bytes", () =>
+    Effect.gen(function*() {
+      const long = fakeHttp((request) => {
+        const { payload } = answer(request)
+        const padded = new Uint8Array(0x10000)
+        padded.set(payload)
+        return { payload: padded }
+      })
+      assert.strictEqual(reasonOf(yield* runHttps(long, { attempts: 1 })), "InvalidResponse")
+      const declared = fakeHttp((request) => ({ ...answer(request), headers: { "content-length": "65536" } }))
+      assert.strictEqual(reasonOf(yield* runHttps(declared, { attempts: 1 })), "InvalidResponse")
     }))
 
   it.effect("rejects responses that do not match the query", () =>
@@ -866,9 +923,20 @@ describe("makeTransportHttps", () => {
   it.effect("rejects invalid URLs", () =>
     Effect.gen(function*() {
       const http = fakeHttp(() => "hang")
-      for (const urls of [[] as any, ["dns.example"] as const, ["ftp://dns.example/"] as const]) {
+      for (
+        const urls of [
+          [] as any,
+          ["dns.example"] as const,
+          ["ftp://dns.example/"] as const,
+          ["http://dns.example/dns-query"] as const,
+          ["http://192.0.2.53/dns-query"] as const
+        ]
+      ) {
         assert.isTrue(Exit.hasDies(yield* Effect.exit(httpsTransport(http, { urls }))), JSON.stringify(urls))
       }
+      // HTTP is accepted for loopback hosts.
+      const loopback = ["http://127.0.0.1:8080/dns-query", "http://[::1]/dns-query", "http://localhost/"] as const
+      yield* httpsTransport(http, { urls: loopback })
     }))
 })
 
@@ -946,7 +1014,7 @@ describe("layerDns", () => {
     Dns.makeRecordUnsafe("A", { address: NetAddress.ipFromStringUnsafe(address) as NetAddress.Ipv4Address })
   const aaaa = (address: string) =>
     Dns.makeRecordUnsafe("AAAA", { address: NetAddress.ipFromStringUnsafe(address) as NetAddress.Ipv6Address })
-  const cname = (target: string) => Dns.makeRecordUnsafe("CNAME", { target: name(target) })
+  const cname = (target: string) => Dns.makeRecordUnsafe("CNAME", { target })
   const ptr = (host: string) => Dns.makeRecordUnsafe("PTR", { host: name(host) })
 
   /**
@@ -961,6 +1029,7 @@ describe("layerDns", () => {
     readonly noAaaa?: boolean
     readonly hosts?: string
     readonly chains?: boolean
+    readonly authority?: ReadonlyArray<Dns.DnsRecord>
     readonly failures?: Record<string, Dns.DnsErrorReason>
   }) => {
     const queries: Array<string> = []
@@ -978,7 +1047,7 @@ describe("layerDns", () => {
           for (let hops = 0; owner !== undefined && hops < 20; hops++) {
             const records: ReadonlyArray<Dns.DnsRecord | Dns.Unknown> = options.records[owner] ?? []
             for (const data of records) {
-              if (data._tag === type || data._tag === "CNAME" || data._tag === "Unknown") {
+              if (data._tag === type || data._tag === "CNAME" || data._tag === "UNKNOWN") {
                 answer.push({ owner: owner.toUpperCase(), ttl: Duration.seconds(60), class: 1, data })
               }
             }
@@ -996,7 +1065,12 @@ describe("layerDns", () => {
             },
             rcode: key in options.records ? 0 : 3,
             answer,
-            authority: [],
+            authority: (options.authority ?? []).map((data) => ({
+              owner: "example.test.",
+              ttl: Duration.seconds(60),
+              class: 1,
+              data
+            })),
             additional: [],
             edns: undefined
           })
@@ -1156,10 +1230,46 @@ describe("layerDns", () => {
       assert.deepStrictEqual(queries, ["www.example.test. A", "cdn.example.test. A"])
     }))
 
+  it.effect("does not query the target of a CNAME record in a negative response", () =>
+    Effect.gen(function*() {
+      const soa = Dns.makeRecordUnsafe("SOA", {
+        primary: name("ns.example.test."),
+        admin: "hostmaster.example.test.",
+        serial: 1,
+        refresh: Duration.hours(1),
+        retry: Duration.minutes(10),
+        expire: Duration.days(7),
+        minimum: Duration.minutes(5)
+      })
+      const { dns, queries } = staticClient({
+        chains: true,
+        authority: [soa],
+        records: { "www.example.test.": [cname("cdn.example.test.")], "cdn.example.test.": [a("192.0.2.1")] }
+      })
+      const error = yield* Effect.flip((yield* dns).lookup(name("www.example.test"), { family: "IPv6" }))
+      assert.strictEqual(error.reason, "NotFound")
+      assert.deepStrictEqual(queries, ["www.example.test. AAAA"])
+    }))
+
+  it.effect("reports failed CNAME target queries with the queried name", () =>
+    Effect.gen(function*() {
+      const { dns } = staticClient({
+        records: { "www.example.test.": [cname("cdn.example.test.")] },
+        failures: { "cdn.example.test.": "Timeout" }
+      })
+      const error = yield* Effect.flip((yield* dns).resolve(name("www.example.test"), "A"))
+      assert.deepStrictEqual([error.reason, error.method, error.hostname, error.recordType], [
+        "Timeout",
+        "resolve",
+        "www.example.test",
+        "A"
+      ])
+    }))
+
   it.effect("follows up to 8 CNAME records", () =>
     Effect.gen(function*() {
       const chain = (aliases: number) => {
-        const records: Record<string, ReadonlyArray<Dns.DnsRecord | Dns.Unknown>> = {}
+        const records: Record<string, ReadonlyArray<Dns.DnsRecord>> = {}
         for (let i = 0; i < aliases; i++) records[`a${i}.example.test.`] = [cname(`a${i + 1}.example.test.`)]
         records[`a${aliases}.example.test.`] = [a("192.0.2.1")]
         return staticClient({ records })
@@ -1188,9 +1298,9 @@ describe("layerDns", () => {
         records: {
           "example.test.": [
             ptr("good.example.test."),
-            Dns.makeRecordUnsafe("Unknown", { type: 0xff00, data: Uint8Array.of(0) })
+            Dns.makeUnknownRecordUnsafe({ type: 0xff00, data: Uint8Array.of(0) })
           ],
-          "other.test.": [Dns.makeRecordUnsafe("Unknown", { type: 0xff00, data: Uint8Array.of(0) })]
+          "other.test.": [Dns.makeUnknownRecordUnsafe({ type: 0xff00, data: Uint8Array.of(0) })]
         }
       })
       assert.deepStrictEqual(yield* (yield* dns).resolve(name("example.test"), "PTR"), [ptr("good.example.test.")])
@@ -1211,19 +1321,22 @@ describe("layerDns", () => {
 
   it.effect("looks up the names of an address through classless delegations", () =>
     Effect.gen(function*() {
-      const { dns } = staticClient({
-        chains: true,
-        records: {
-          "1.2.0.192.in-addr.arpa.": [cname("1.0-25.2.0.192.in-addr.arpa.")],
-          "1.0-25.2.0.192.in-addr.arpa.": [ptr("host.example.test.")]
-        }
-      })
+      const records = {
+        "1.2.0.192.in-addr.arpa.": [cname("1.0/25.2.0.192.in-addr.arpa.")],
+        "1.0/25.2.0.192.in-addr.arpa.": [ptr("host.example.test.")]
+      }
+      const { dns } = staticClient({ chains: true, records })
       assert.deepStrictEqual<ReadonlyArray<string>>(
         yield* (yield* dns).reverse(NetAddress.ipFromStringUnsafe("192.0.2.1")),
         [
           "host.example.test."
         ]
       )
+      // A target that is not a host name cannot be queried.
+      const unchained = staticClient({ records })
+      const notFound = yield* Effect.flip((yield* unchained.dns).reverse(NetAddress.ipFromStringUnsafe("192.0.2.1")))
+      assert.strictEqual(notFound.reason, "NotFound")
+      assert.deepStrictEqual(unchained.queries, ["1.2.0.192.in-addr.arpa PTR"])
       const failing = staticClient({ records: {}, failures: { "2.2.0.192.in-addr.arpa.": "Refused" } })
       const error = yield* Effect.flip((yield* failing.dns).reverse(NetAddress.ipFromStringUnsafe("192.0.2.2")))
       assert.deepStrictEqual([error.reason, error.method, error.hostname], ["Refused", "reverse", "192.0.2.2"])

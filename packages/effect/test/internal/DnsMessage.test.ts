@@ -14,7 +14,7 @@ const hex = (input: string): Uint8Array =>
 const name = Host.domainNameFromStringUnsafe
 const ip = NetAddress.ipFromStringUnsafe
 
-const rr = <D extends Dns.DnsRecord | Dns.Unknown>(owner: string, ttl: number, data: D) => ({
+const rr = <D extends Dns.DnsRecord>(owner: string, ttl: number, data: D) => ({
   owner,
   ttl: Duration.seconds(ttl),
   class: 1,
@@ -38,7 +38,7 @@ const decodeError = (bytes: Uint8Array): string => {
   const result = DnsMessage.decodeResponse(bytes)
   assert.isTrue(Result.isFailure(result), "expected the message to be rejected")
   const error = Result.isFailure(result) ? result.failure : undefined!
-  assert.strictEqual(error._tag, "DnsMessageError")
+  assert.instanceOf(error, Error)
   return error.message
 }
 
@@ -300,10 +300,10 @@ describe("DnsMessage", () => {
       ])
     })
 
-    it("decomposes compressed names and preserves the case of owner names", () => {
+    it("decomposes compressed names and preserves the case of owner names and CNAME targets", () => {
       const response = decode(compressed)
       assert.deepStrictEqual(response.answer, [
-        rr("WWW.Example.test.", 3600, Dns.makeRecordUnsafe("CNAME", { target: name("example.test.") })),
+        rr("WWW.Example.test.", 3600, Dns.makeRecordUnsafe("CNAME", { target: "Example.test." })),
         rr("Example.test.", 60, Dns.makeRecordUnsafe("A", { address: ip("192.0.2.1") as NetAddress.Ipv4Address }))
       ])
       assert.isFalse(response.flags.authoritative)
@@ -328,6 +328,15 @@ describe("DnsMessage", () => {
       assert.deepStrictEqual(
         decodeData(257, "80 05 6973737565 6361"),
         Dns.makeRecordUnsafe("CAA", { critical: true, tag: "issue", value: "ca" })
+      )
+      // A classless reverse delegation (RFC 2317) and a UTF-8 label.
+      assert.deepStrictEqual(
+        decodeData(5, "01 31 04 302f3235 01 32 00"),
+        Dns.makeRecordUnsafe("CNAME", { target: "1.0/25.2." })
+      )
+      assert.deepStrictEqual(
+        decodeData(5, "05 636166c3a9 00"),
+        Dns.makeRecordUnsafe("CNAME", { target: "café." })
       )
       assert.deepStrictEqual(
         decodeData(15, "000a 046d61696c00"),
@@ -357,7 +366,7 @@ describe("DnsMessage", () => {
     it("keeps records of unknown types as undecoded data", () => {
       const message = hex(`0000 8000 0000 0001 0000 0000 01 61 00 ff00 0001 00000001 0003 010203`)
       assert.deepStrictEqual(decode(message).answer.map((record) => record.data), [
-        Dns.makeRecordUnsafe("Unknown", { type: 0xff00, data: hex("010203") })
+        Dns.makeUnknownRecordUnsafe({ type: 0xff00, data: hex("010203") })
       ])
     })
 
@@ -365,7 +374,7 @@ describe("DnsMessage", () => {
       const message = hex(`0000 8000 0000 0001 0000 0000 01 61 00 ff00 0001 00000001 0001 01`)
       const [record] = decode(message).answer
       message[message.length - 1] = 2
-      assert.deepStrictEqual(record.data, Dns.makeRecordUnsafe("Unknown", { type: 0xff00, data: hex("01") }))
+      assert.deepStrictEqual(record.data, Dns.makeUnknownRecordUnsafe({ type: 0xff00, data: hex("01") }))
     })
 
     it("treats TTLs of 2^31 seconds or more as zero", () => {
@@ -449,7 +458,7 @@ describe("DnsMessage", () => {
           ["0101 0001 00000001 0005 00 02 6180 62", "invalid CAA record tag"], // tag that is not ASCII
           ["0010 0001 00000001 0000", "invalid TXT record chunks"], // no character strings
           ["0034 0001 00000001 0003 030101", "invalid TLSA record data"], // no data
-          ["0005 0001 00000001 0007 05 636166c3a9 00", "invalid CNAME record target"], // UTF-8 "café"
+          ["0002 0001 00000001 0007 05 636166c3a9 00", "invalid NS record host"], // UTF-8 "café"
           ["000f 0001 00000001 000a 000a 06 6d61696c 2031 00", "invalid MX record exchange"] // "mail 1"
         ]
       ) {

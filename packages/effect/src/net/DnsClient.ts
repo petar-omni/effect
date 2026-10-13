@@ -14,7 +14,6 @@ import * as Duration from "../Duration.ts"
 import * as Effect from "../Effect.ts"
 import * as Base64Url from "../encoding/Base64Url.ts"
 import * as Equal from "../Equal.ts"
-import * as MediaType from "../http-api/internal/mediaType.ts"
 import * as HttpClient from "../http/HttpClient.ts"
 import * as HttpClientRequest from "../http/HttpClientRequest.ts"
 import * as DnsMessage from "../internal/dnsMessage.ts"
@@ -23,6 +22,7 @@ import * as Result from "../Result.ts"
 import type * as Scope from "../Scope.ts"
 import type * as DatagramSocket from "../socket/DatagramSocket.ts"
 import * as Socket from "../socket/Socket.ts"
+import * as Stream from "../Stream.ts"
 import * as Dns from "./Dns.ts"
 import * as Host from "./Host.ts"
 import * as NetAddress from "./NetAddress.ts"
@@ -86,7 +86,7 @@ export class DnsClient extends Context.Service<DnsClient, {
   /**
    * Queries the records of one type for a name, without search domains.
    * NXDOMAIN responses succeed; other errors fail once every name server has
-   * been tried.
+   * been tried. Types that are not a `Dns.RecordType` fail with `Unsupported`.
    */
   query(
     name: Host.DomainNameInput,
@@ -308,7 +308,14 @@ export const makeTransportUdp = (
   })
 
 /**
- * Options for `makeTransportHttps`. `method` defaults to `"GET"`.
+ * Options for `makeTransportHttps`.
+ *
+ * **Details**
+ *
+ * `method` defaults to `"GET"`. `http:` URLs are accepted only for loopback
+ * hosts. `transformClient` customizes the `HttpClient`, such as to add
+ * headers. Status codes and retries are handled by the transport and
+ * `DnsClient`.
  *
  * @stability experimental
  * @category models
@@ -317,9 +324,18 @@ export const makeTransportUdp = (
 export interface TransportHttpsOptions {
   readonly urls: Arr.NonEmptyReadonlyArray<string | URL>
   readonly method?: "GET" | "POST" | undefined
+  readonly transformClient?: ((client: HttpClient.HttpClient) => HttpClient.HttpClient) | undefined
 }
 
 const dnsMessage = "application/dns-message"
+
+const maxMessageSize = 0xffff
+
+const isLoopbackHost = (hostname: string): boolean => {
+  if (hostname === "localhost" || hostname.endsWith(".localhost")) return true
+  const address = Result.getOrUndefined(NetAddress.ipFromString(hostname.replace(/^\[(.*)\]$/, "$1")))
+  return address !== undefined && NetAddress.isLoopback(address)
+}
 
 /**
  * Creates a `Transport` that sends queries with the `HttpClient` service, as
@@ -340,12 +356,12 @@ export const makeTransportHttps = (
     }
     const urls = Arr.map(options.urls, (input) => {
       const url = new URL(input)
-      if (url.protocol !== "https:" && url.protocol !== "http:") {
-        throw new RangeError(`DnsClient URLs must use HTTP or HTTPS, received ${url}`)
+      if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
+        throw new RangeError(`DnsClient URLs must use HTTPS, or HTTP for loopback hosts, received ${url}`)
       }
       return url
     })
-    const client = HttpClient.withScope(httpClient)
+    const client = HttpClient.withScope(options.transformClient?.(httpClient) ?? httpClient)
     const post = options.method === "POST"
 
     return Transport.of({
@@ -367,10 +383,22 @@ export const makeTransportHttps = (
                 new Error(`the server responded with status ${response.status}`)
               )
             }
-            if (MediaType.normalize(response.headers["content-type"] ?? "") !== dnsMessage) {
+            const contentType = (response.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase()
+            if (contentType !== dnsMessage) {
               return yield* fail("InvalidResponse", new Error("the response is not a DNS message"))
             }
-            return new Uint8Array(yield* response.arrayBuffer)
+            const tooLong = () =>
+              fail("InvalidResponse", new Error(`the response is longer than ${maxMessageSize} bytes`))
+            if (Number(response.headers["content-length"]) > maxMessageSize) return yield* tooLong()
+            const chunks: Array<Uint8Array> = []
+            let length = 0
+            yield* Stream.runForEach(response.stream, (chunk) => {
+              length += chunk.length
+              if (length > maxMessageSize) return Effect.fail(tooLong())
+              chunks.push(chunk)
+              return Effect.void
+            })
+            return concat(new Uint8Array(0), chunks)
           }))
           if (!matches(payload, 0)) {
             return yield* fail("InvalidResponse", new Error("the response does not match the query"))
@@ -479,6 +507,7 @@ export const make = (options: MakeOptions = {}): Effect.Effect<DnsClient["Servic
       const name = parsed.success
       const fail = (reason: Dns.DnsErrorReason, cause?: unknown) =>
         new Dns.DnsError({ reason, method: "resolve", hostname: name, recordType: type, cause })
+      if (!Dns.isRecordType(type)) return yield* fail("Unsupported")
       const question = { name: Host.toFullyQualified(name), type: DnsMessage.typeCodes[type] }
       const recursionDesired = queryOptions?.recursionDesired ?? true
 
@@ -512,6 +541,13 @@ export const make = (options: MakeOptions = {}): Effect.Effect<DnsClient["Servic
         const response = decoded.success
         if (response.rcode !== 0 && response.rcode !== 3) {
           return yield* fail(rcodeReasons[response.rcode] ?? "Unknown", response)
+        }
+        // A referral from a server without recursion, skipped like glibc and Go.
+        if (
+          recursionDesired && response.rcode === 0 && !response.flags.authoritative &&
+          !response.flags.recursionAvailable && response.answer.length === 0 && response.additional.length === 0
+        ) {
+          return yield* fail("Refused", new Error("the server does not offer recursion"))
         }
         return response
       })
@@ -669,8 +705,13 @@ export const parseResolvConf = (text: string): ResolvConf => {
 // CNAME records followed per lookup, including those of follow-up queries.
 const maxAliases = 8
 
-const withMethod = (method: "lookup" | "reverse", hostname: string) => (error: Dns.DnsError) =>
-  new Dns.DnsError({ reason: error.reason, method, hostname, cause: error.cause })
+const failureOf =
+  (method: Dns.DnsError["method"], hostname: string, recordType?: Dns.RecordType) => (error: Dns.DnsError) =>
+    new Dns.DnsError({ reason: error.reason, method, hostname, recordType, cause: error.cause })
+
+// The name to query for a CNAME target, if it is a host name.
+const queryName = (target: string): Host.DomainName | undefined =>
+  /^[\w.-]+$/.test(target) ? Result.getOrUndefined(Host.domainNameFromString(target)) : undefined
 
 /**
  * Layer that provides the `Dns` service by querying name servers with
@@ -681,7 +722,8 @@ const withMethod = (method: "lookup" | "reverse", hostname: string) => (error: D
  * `lookup` checks the `hosts` table first and resolves `localhost` names to
  * loopback addresses. Other names are queried as A and AAAA records with the
  * `search` domains and `ndots`, like a stub resolver. Queries follow up to 8
- * CNAME records.
+ * CNAME records, querying a target that a response leaves unresolved unless
+ * the response is negative.
  *
  * @stability experimental
  * @category layers
@@ -708,8 +750,7 @@ export const layerDns: Layer.Layer<Dns.Dns, never, DnsClient> = Layer.effect(
       aliases = maxAliases
     ): Effect.Effect<ReadonlyArray<Dns.RecordFor<T>>, Dns.DnsError> =>
       Effect.flatMap(client.query(name, type), (response) => {
-        let owner = Host.toFullyQualified(name)
-        let target: Host.DomainName | undefined
+        let owner: string = Host.toFullyQualified(name)
         for (let hops = 0; hops <= aliases; hops++) {
           const atOwner = response.answer.filter((record) => asciiLowerCase(record.owner) === owner)
           const records = atOwner.flatMap((record) =>
@@ -718,12 +759,12 @@ export const layerDns: Layer.Layer<Dns.Dns, never, DnsClient> = Layer.effect(
           if (records.length > 0) return Effect.succeed(records)
           const alias = atOwner.find((record) => record.data._tag === "CNAME")?.data as Dns.Cname | undefined
           if (alias === undefined) {
-            return target === undefined || response.rcode !== 0
-              ? Effect.succeed([])
-              : resolveChain(target, type, aliases - hops)
+            // NXDOMAIN, or NODATA with the SOA record of the target's zone (RFC 2308).
+            const negative = response.rcode !== 0 || response.authority.some((record) => record.data._tag === "SOA")
+            const target = hops === 0 || negative ? undefined : queryName(owner)
+            return target === undefined ? Effect.succeed([]) : resolveChain(target, type, aliases - hops)
           }
-          target = alias.target
-          owner = Host.toFullyQualified(target)
+          owner = asciiLowerCase(alias.target)
         }
         return Effect.succeed([])
       })
@@ -759,14 +800,14 @@ export const layerDns: Layer.Layer<Dns.Dns, never, DnsClient> = Layer.effect(
           if (addresses.length > 0) return addresses
           error ??= results.find(Result.isFailure)?.failure
         }
-        if (error !== undefined) return yield* withMethod("lookup", host)(error)
+        if (error !== undefined) return yield* failureOf("lookup", host)(error)
         return []
       }),
-      resolve: (name, type) => resolveChain(name, type),
+      resolve: (name, type) => Effect.mapError(resolveChain(name, type), failureOf("resolve", name, type)),
       reverse: (address) =>
         resolveChain(Dns.reverseName(address), "PTR").pipe(
           Effect.map(Arr.map((record) => record.host)),
-          Effect.mapError(withMethod("reverse", NetAddress.formatIp(address)))
+          Effect.mapError(failureOf("reverse", NetAddress.formatIp(address)))
         )
     })
   })

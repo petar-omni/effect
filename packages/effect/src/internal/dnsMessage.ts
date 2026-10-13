@@ -1,17 +1,10 @@
 // DNS message encoding and decoding (RFC 1035, EDNS(0) from RFC 6891).
-import * as Data from "../Data.ts"
 import * as Duration from "../Duration.ts"
 import * as Dns from "../net/Dns.ts"
 import type * as DnsClient from "../net/DnsClient.ts"
 import * as Host from "../net/Host.ts"
 import * as NetAddress from "../net/NetAddress.ts"
 import * as Result from "../Result.ts"
-
-/** @internal */
-export class DnsMessageError extends Data.TaggedError("DnsMessageError")<{
-  readonly message: string
-  readonly offset: number
-}> {}
 
 /** @internal */
 export const typeCodes: { readonly [K in Dns.RecordType]: number } = {
@@ -114,7 +107,7 @@ const ascii = (bytes: Uint8Array): string | undefined => {
   return out
 }
 
-// Writes a name as text, like `Dns.Ptr` host names: each label is decoded as
+// Writes a name as text, like `Dns.Ptr` hosts and `Dns.Cname` targets: each label is decoded as
 // UTF-8, with dots and backslashes inside a label escaped as `\.` and `\\`.
 const textName = (labels: ReadonlyArray<Uint8Array>): string =>
   labels.length === 0 ? "." : `${labels.map((label) => utf8.decode(label).replace(/[.\\]/g, "\\$&")).join(".")}.`
@@ -139,8 +132,8 @@ class MessageReader {
     this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   }
 
-  fail(message: string, offset = this.offset): never {
-    throw new DnsMessageError({ message, offset })
+  fail(message: string): never {
+    throw new Error(message)
   }
 
   need(length: number, what: string): void {
@@ -184,7 +177,7 @@ class MessageReader {
     let next = -1
     let length = 1
     while (true) {
-      if (position >= bytes.length) this.fail(`truncated ${what}`, position)
+      if (position >= bytes.length) this.fail(`truncated ${what}`)
       const byte = bytes[position]
       if (byte === 0) {
         if (next === -1) next = position + 1
@@ -193,22 +186,22 @@ class MessageReader {
       switch (byte & 0xc0) {
         case 0x00: {
           length += byte + 1
-          if (length > MAX_NAME_LENGTH) this.fail(`${what} is longer than ${MAX_NAME_LENGTH} bytes`, position)
-          if (position + 1 + byte > bytes.length) this.fail(`truncated ${what}`, position)
+          if (length > MAX_NAME_LENGTH) this.fail(`${what} is longer than ${MAX_NAME_LENGTH} bytes`)
+          if (position + 1 + byte > bytes.length) this.fail(`truncated ${what}`)
           labels.push(bytes.subarray(position + 1, position + 1 + byte))
           position += 1 + byte
           break
         }
         case 0xc0: {
-          if (position + 1 >= bytes.length) this.fail(`truncated ${what}`, position)
+          if (position + 1 >= bytes.length) this.fail(`truncated ${what}`)
           const target = ((byte & 0x3f) << 8) | bytes[position + 1]
-          if (target >= limit) this.fail(`${what} has a compression pointer that does not point backward`, position)
+          if (target >= limit) this.fail(`${what} has a compression pointer that does not point backward`)
           if (next === -1) next = position + 2
           position = limit = target
           break
         }
         default:
-          this.fail(`${what} has an unsupported label type`, position)
+          this.fail(`${what} has an unsupported label type`)
       }
     }
     this.offset = next
@@ -246,7 +239,7 @@ const readData = (
       return record("CAA", { critical: (flags & 0x80) !== 0, tag, value })
     }
     case typeCodes.CNAME:
-      return record("CNAME", { target: domainName(reader.name("CNAME target")) })
+      return record("CNAME", { target: textName(reader.name("CNAME target")) })
     case typeCodes.MX: {
       const priority = reader.u16("MX priority")
       return record("MX", { priority, exchange: domainName(reader.name("MX exchange")) })
@@ -328,19 +321,18 @@ const readHeader = (reader: MessageReader) => {
   return { header, counts }
 }
 
-const decode = <A>(bytes: Uint8Array, f: (reader: MessageReader) => A): Result.Result<A, DnsMessageError> =>
+const decode = <A>(bytes: Uint8Array, f: (reader: MessageReader) => A): Result.Result<A, Error> =>
   Result.try({
     try: () => f(new MessageReader(bytes)),
-    catch: (cause) =>
-      cause instanceof DnsMessageError ? cause : new DnsMessageError({ message: String(cause), offset: -1 })
+    catch: (cause) => cause instanceof Error ? cause : new Error(String(cause))
   })
 
 /** @internal */
-export const decodeHeader = (bytes: Uint8Array): Result.Result<Header, DnsMessageError> =>
+export const decodeHeader = (bytes: Uint8Array): Result.Result<Header, Error> =>
   decode(bytes, (reader) => readHeader(reader).header)
 
 /** @internal */
-export const decodeResponse = (bytes: Uint8Array): Result.Result<DnsClient.Response, DnsMessageError> =>
+export const decodeResponse = (bytes: Uint8Array): Result.Result<DnsClient.Response, Error> =>
   decode(bytes, (reader) => {
     const { counts, header } = readHeader(reader)
     let edns: DnsClient.Response["edns"]
@@ -348,7 +340,6 @@ export const decodeResponse = (bytes: Uint8Array): Result.Result<DnsClient.Respo
     const section = (count: number, additional: boolean) => {
       const records: Array<DnsClient.ResourceRecord> = []
       for (let i = 0; i < count; i++) {
-        const start = reader.offset
         const owner = textName(reader.name("record owner"))
         const type = reader.u16("record type")
         const klass = reader.u16("record class")
@@ -357,9 +348,9 @@ export const decodeResponse = (bytes: Uint8Array): Result.Result<DnsClient.Respo
         reader.need(length, "record data")
         const end = reader.offset + length
         if (type === OPT) {
-          if (!additional) reader.fail("OPT record outside the additional section", start)
-          if (edns !== undefined) reader.fail("more than one OPT record", start)
-          if (owner !== ".") reader.fail("OPT record owner must be the root name", start)
+          if (!additional) reader.fail("OPT record outside the additional section")
+          if (edns !== undefined) reader.fail("more than one OPT record")
+          if (owner !== ".") reader.fail("OPT record owner must be the root name")
           extendedRcode = ttl >>> 24
           edns = { udpPayloadSize: klass, version: (ttl >>> 16) & 0xff, dnssecOk: (ttl & 0x8000) !== 0 }
           reader.offset = end
@@ -367,11 +358,11 @@ export const decodeResponse = (bytes: Uint8Array): Result.Result<DnsClient.Respo
         }
         const decoded = readData(reader, type, end)
         const data = decoded === undefined
-          ? Dns.makeRecordUnsafe("Unknown", { type, data: reader.bytes.subarray(end - length, end) })
+          ? Dns.makeUnknownRecordUnsafe({ type, data: reader.bytes.subarray(end - length, end) })
           : Result.isSuccess(decoded)
           ? decoded.success
-          : reader.fail(decoded.failure.message, start)
-        if (reader.offset !== end) reader.fail("record data does not match its length", start)
+          : reader.fail(decoded.failure.message)
+        if (reader.offset !== end) reader.fail("record data does not match its length")
         records.push({
           owner,
           ttl: Duration.seconds(ttl > 0x7fffffff ? 0 : ttl),

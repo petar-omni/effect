@@ -13855,20 +13855,22 @@ const dnsSeconds = dnsUint32.pipe(decodeTo(
 
 // Each record type is an opaque value whose JSON form is a plain object tagged
 // by record type, such as `{ "_tag": "MX", "exchange": "mail.example.com", "priority": 10 }`.
-const dnsRecordOfType = <T extends Dns_.RecordType | "Unknown">(
-  type: T,
-  fields: { readonly [K in keyof Dns_.RecordFields<T>]-?: Codec<Dns_.RecordFields<T>[K], unknown> }
+const dnsRecordSchema = <R extends Dns_.DnsRecord | Dns_.Unknown, F>(
+  type: string,
+  is: (u: unknown) => u is R,
+  fields: { readonly [K in keyof F]-?: Codec<F[K], unknown> },
+  make: (fields: F) => Result_.Result<R, NetAddress_.NetAddressError>
 ) =>
-  declare((u): u is Dns_.RecordFor<T> => (Dns_.isDnsRecord(u) || Dns_.isUnknownRecord(u)) && u._tag === type, {
+  declare(is, {
     identifier: `Dns${type.charAt(0)}${type.slice(1).toLowerCase()}Record`,
     toCodecJson: () => {
       const json = TaggedStruct(type, fields)
-      return link<Dns_.RecordFor<T>>()(
+      return link<R>()(
         json,
         SchemaTransformation.transformEffect({
           decode: (input, options) => {
-            const { _tag, ...rest } = input as { readonly _tag: T }
-            const result = Dns_.makeRecord(type, rest as Dns_.RecordFields<T>)
+            const { _tag, ...rest } = input as { readonly _tag: string }
+            const result = make(rest as F)
             return Result_.isSuccess(result)
               ? Effect.succeed(result.success)
               : Effect.fail(new SchemaIssue.InvalidValue({ message: result.failure.message }, input, options))
@@ -13879,6 +13881,17 @@ const dnsRecordOfType = <T extends Dns_.RecordType | "Unknown">(
       )
     }
   })
+
+const dnsRecordOfType = <T extends Dns_.RecordType>(
+  type: T,
+  fields: { readonly [K in keyof Dns_.RecordFields<T>]-?: Codec<Dns_.RecordFields<T>[K], unknown> }
+) =>
+  dnsRecordSchema<Dns_.RecordFor<T>, Dns_.RecordFields<T>>(
+    type,
+    (u): u is Dns_.RecordFor<T> => Dns_.isDnsRecord(u) && u._tag === type,
+    fields,
+    (fields) => Dns_.makeRecord(type, fields)
+  )
 
 /**
  * Type-level representation of {@link DnsARecord}.
@@ -13966,7 +13979,7 @@ export interface DnsCnameRecord extends declare<Dns_.Cname> {
  * @category schemas
  * @since 4.0.0
  */
-export const DnsCnameRecord: DnsCnameRecord = dnsRecordOfType("CNAME", { target: DomainName })
+export const DnsCnameRecord: DnsCnameRecord = dnsRecordOfType("CNAME", { target: NonEmptyString })
 
 /**
  * Type-level representation of {@link DnsMxRecord}.
@@ -14177,10 +14190,12 @@ export interface DnsUnknownRecord extends declare<Dns_.Unknown> {
  * @category schemas
  * @since 4.0.0
  */
-export const DnsUnknownRecord: DnsUnknownRecord = dnsRecordOfType("Unknown", {
-  type: dnsUint16,
-  data: Uint8ArrayFromHex
-})
+export const DnsUnknownRecord: DnsUnknownRecord = dnsRecordSchema(
+  "UNKNOWN",
+  Dns_.isUnknownRecord,
+  { type: dnsUint16, data: Uint8ArrayFromHex },
+  Dns_.makeUnknownRecord
+)
 
 /**
  * Type-level representation of {@link DnsRecord}.

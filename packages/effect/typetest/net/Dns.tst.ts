@@ -39,10 +39,17 @@ describe("Dns", () => {
         return Effect.succeed([])
       }
     })
-    expect<Dns.Cname["target"]>().type.toBe<Host.DomainName>()
+    expect<Dns.Cname["target"]>().type.toBe<string>()
     expect<Dns.Mx["exchange"]>().type.toBe<Host.DomainName>()
     expect<Dns.Srv["target"]>().type.toBe<Host.DomainName>()
     expect<Dns.Soa["primary"]>().type.toBe<Host.DomainName>()
-    expect(Dns.makeRecord).type.not.toBeCallableWith("CNAME", { target: "db.example.com" })
+    expect(Dns.makeRecord).type.not.toBeCallableWith("MX", { exchange: "mail.example.com", priority: 10 })
+  })
+
+  it("makes Unknown records with their own constructor", () => {
+    expect(Dns.makeUnknownRecordUnsafe({ type: 65280, data: new Uint8Array() })).type.toBe<Dns.Unknown>()
+    expect<Dns.Unknown>().type.not.toBeAssignableTo<Dns.DnsRecord>()
+    expect(Dns.makeRecord).type.not.toBeCallableWith("UNKNOWN", { type: 65280, data: new Uint8Array() })
+    expect(dns.resolve).type.not.toBeCallableWith("example.com", "UNKNOWN")
   })
 })
