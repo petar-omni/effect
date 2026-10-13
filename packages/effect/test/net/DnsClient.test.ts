@@ -1,7 +1,8 @@
 import { assert, describe, it } from "@effect/vitest"
-import { Crypto, Duration, Effect, Equal, Exit, Fiber, Layer, Queue, Result } from "effect"
+import { Cause, Context, Crypto, Duration, Effect, Equal, Exit, Fiber, Layer, Queue, Result } from "effect"
 import * as Base64Url from "effect/encoding/Base64Url"
 import * as Hex from "effect/encoding/Hex"
+import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as HttpClient from "effect/http/HttpClient"
 import * as HttpClientError from "effect/http/HttpClientError"
 import * as HttpClientRequest from "effect/http/HttpClientRequest"
@@ -421,7 +422,7 @@ describe("DnsClient", () => {
       assert.strictEqual(network.requests.length, 4)
     }))
 
-  it.effect("reports transport errors as Refused", () =>
+  it.effect("reports transport errors as Temporary", () =>
     Effect.gen(function*() {
       const network = fakeNetwork(() => [])
       const udp = (server: NetAddress.InetAddress) =>
@@ -439,7 +440,7 @@ describe("DnsClient", () => {
             })
           }))
       const exit = yield* run(udpTransport({ udp, tcp: network.tcp }), { attempts: 1 })
-      assert.strictEqual(reasonOf(exit), "Refused")
+      assert.strictEqual(reasonOf(exit), "Temporary")
       assert.strictEqual(network.state.open, 0)
     }))
 
@@ -629,6 +630,60 @@ describe("makeTransportTcp", () => {
       const network = fakeNetwork(() => [])
       assert.isTrue(Exit.hasDies(yield* Effect.exit(tcpTransport(network, { nameServers: [] as any }))))
     }))
+
+  /**
+   * A TCP connection that answers a query with the chunks of `reply`, then
+   * closes when `close` is set.
+   */
+  const scriptedTcp =
+    (reply: (query: Uint8Array) => ReadonlyArray<Uint8Array>, close = false) => (_server: NetAddress.InetAddress) =>
+      Effect.gen(function*() {
+        const queue = yield* Queue.unbounded<Uint8Array, Socket.SocketError>()
+        return Socket.make({
+          reader: Effect.succeed({ pull: Queue.takeAll(queue), upgrade: () => Effect.void }),
+          writer: Effect.succeed({
+            write: (chunk) =>
+              Effect.sync(() => {
+                for (const part of reply((chunk as Uint8Array).subarray(2))) Queue.offerUnsafe(queue, part)
+                if (close) {
+                  Queue.failCauseUnsafe(
+                    queue,
+                    Cause.fail(new Socket.SocketError({ reason: new Socket.SocketCloseError({ code: 1000 }) }))
+                  )
+                }
+              }),
+            writeAll: () => Effect.die("unused")
+          })
+        })
+      })
+
+  const framed = (query: Uint8Array): Uint8Array => {
+    const header = Result.getOrThrow(DnsMessage.decodeHeader(query))
+    const { payload } = answer({ header })
+    return Uint8Array.from([payload.length >> 8, payload.length & 0xff, ...payload])
+  }
+
+  const tcpWith = (tcp: DnsClient.TransportTcpOptions["tcp"]) =>
+    DnsClient.makeTransportTcp({ nameServers: [primary], tcp }).pipe(Effect.provideService(Crypto.Crypto, crypto))
+
+  it.effect("reassembles responses sent a byte at a time and ignores trailing bytes", () =>
+    Effect.gen(function*() {
+      const tcp = scriptedTcp((query) => Array.from([...framed(query), 0xff, 0xff], (byte) => Uint8Array.of(byte)))
+      const exit = yield* run(tcpWith(tcp))
+      assert.strictEqual(Exit.isSuccess(exit) ? exit.value.answer.length : 0, 1)
+    }))
+
+  it.effect("reports connections closed before the response ends as Temporary", () =>
+    Effect.gen(function*() {
+      const tcp = scriptedTcp((query) => [framed(query).subarray(0, 20)], true)
+      assert.strictEqual(reasonOf(yield* run(tcpWith(tcp), { attempts: 1 })), "Temporary")
+    }))
+
+  it.effect("rejects empty responses", () =>
+    Effect.gen(function*() {
+      const tcp = scriptedTcp(() => [Uint8Array.of(0, 0)])
+      assert.strictEqual(reasonOf(yield* run(tcpWith(tcp), { attempts: 1 })), "InvalidResponse")
+    }))
 })
 
 describe("makeTransportHttps", () => {
@@ -642,6 +697,7 @@ describe("makeTransportHttps", () => {
     readonly query: Uint8Array
     readonly header: DnsMessage.Header
     readonly signal: AbortSignal
+    readonly requestInit: globalThis.RequestInit | undefined
   }
 
   interface HttpReply {
@@ -660,7 +716,7 @@ describe("makeTransportHttps", () => {
     const requests: Array<HttpRequest> = []
     const layer = Layer.succeed(
       HttpClient.HttpClient,
-      HttpClient.make((request, url, signal) =>
+      HttpClient.make((request, url, signal, fiber) =>
         Effect.suspend(() => {
           const query = request.method === "GET"
             ? Result.getOrThrow(Base64Url.decode(url.searchParams.get("dns") ?? ""))
@@ -676,7 +732,8 @@ describe("makeTransportHttps", () => {
             },
             query,
             header: Result.getOrThrow(DnsMessage.decodeHeader(query)),
-            signal
+            signal,
+            requestInit: Context.getOrUndefined(fiber.context, FetchHttpClient.RequestInit)
           }
           requests.push(received)
           const reply = handle(received)
@@ -781,6 +838,7 @@ describe("makeTransportHttps", () => {
           [{ status: 503, contentType: "text/plain" }, "ServerFailure"],
           [{ status: 404 }, "InvalidResponse"],
           [{ status: 302 }, "InvalidResponse"],
+          [{ status: 429 }, "Temporary"],
           [{ contentType: "text/html" }, "InvalidResponse"],
           [{ contentType: "application/json" }, "InvalidResponse"]
         ] as const
@@ -811,6 +869,16 @@ describe("makeTransportHttps", () => {
       assert.isTrue(Exit.isSuccess(yield* runHttps(http, { transformClient })))
       assert.strictEqual(http.requests[0].headers.authorization, "Bearer token")
       assert.strictEqual(http.requests[0].headers.accept, "application/dns-message")
+    }))
+
+  it.effect("does not let fetch follow redirects", () =>
+    Effect.gen(function*() {
+      const http = fakeHttp((request) => answer(request))
+      const exit = yield* runHttps(http).pipe(
+        Effect.provideService(FetchHttpClient.RequestInit, { credentials: "omit", redirect: "follow" })
+      )
+      assert.isTrue(Exit.isSuccess(exit))
+      assert.deepStrictEqual(http.requests[0].requestInit, { credentials: "omit", redirect: "manual" })
     }))
 
   it.effect("rejects responses longer than 65535 bytes", () =>
@@ -869,10 +937,10 @@ describe("makeTransportHttps", () => {
       assert.strictEqual(Exit.isSuccess(exit) ? exit.value.rcode : undefined, 3)
     }))
 
-  it.effect("reports HTTP client errors as Refused", () =>
+  it.effect("reports HTTP client errors as Temporary", () =>
     Effect.gen(function*() {
       const http = fakeHttp(() => "error")
-      assert.strictEqual(reasonOf(yield* runHttps(http)), "Refused")
+      assert.strictEqual(reasonOf(yield* runHttps(http)), "Temporary")
       assert.strictEqual(http.requests.length, 4)
     }))
 
@@ -929,7 +997,8 @@ describe("makeTransportHttps", () => {
           ["dns.example"] as const,
           ["ftp://dns.example/"] as const,
           ["http://dns.example/dns-query"] as const,
-          ["http://192.0.2.53/dns-query"] as const
+          ["http://192.0.2.53/dns-query"] as const,
+          ["http://dns.localhost/dns-query"] as const
         ]
       ) {
         assert.isTrue(Exit.hasDies(yield* Effect.exit(httpsTransport(http, { urls }))), JSON.stringify(urls))
@@ -1031,6 +1100,7 @@ describe("layerDns", () => {
     readonly chains?: boolean
     readonly authority?: ReadonlyArray<Dns.DnsRecord>
     readonly failures?: Record<string, Dns.DnsErrorReason>
+    readonly class?: number
   }) => {
     const queries: Array<string> = []
     const client = DnsClient.DnsClient.of({
@@ -1048,7 +1118,7 @@ describe("layerDns", () => {
             const records: ReadonlyArray<Dns.DnsRecord | Dns.Unknown> = options.records[owner] ?? []
             for (const data of records) {
               if (data._tag === type || data._tag === "CNAME" || data._tag === "UNKNOWN") {
-                answer.push({ owner: owner.toUpperCase(), ttl: Duration.seconds(60), class: 1, data })
+                answer.push({ owner: owner.toUpperCase(), ttl: Duration.seconds(60), class: options.class ?? 1, data })
               }
             }
             const alias = records.find((record): record is Dns.Cname => record._tag === "CNAME")
@@ -1228,6 +1298,13 @@ describe("layerDns", () => {
         "192.0.2.1"
       ])
       assert.deepStrictEqual(queries, ["www.example.test. A", "cdn.example.test. A"])
+    }))
+
+  it.effect("ignores answer records of classes other than IN", () =>
+    Effect.gen(function*() {
+      const { dns } = staticClient({ class: 3, records: { "example.test.": [a("192.0.2.1")] } })
+      const error = yield* Effect.flip((yield* dns).resolve(name("example.test"), "A"))
+      assert.strictEqual(error.reason, "NotFound")
     }))
 
   it.effect("does not query the target of a CNAME record in a negative response", () =>

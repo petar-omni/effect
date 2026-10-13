@@ -218,7 +218,8 @@ const exactLength = (reader: MessageReader, end: number, length: number, type: s
   if (end - reader.offset !== length) reader.fail(`${type} record data must be ${length} bytes`)
 }
 
-// Returns `undefined` for types that `Dns` does not support.
+// Returns `undefined` for types that `Dns` does not support, and a failure for
+// data that `Dns` cannot represent.
 const readData = (
   reader: MessageReader,
   type: number,
@@ -357,12 +358,11 @@ export const decodeResponse = (bytes: Uint8Array): Result.Result<DnsClient.Respo
           continue
         }
         const decoded = readData(reader, type, end)
-        const data = decoded === undefined
-          ? Dns.makeUnknownRecordUnsafe({ type, data: reader.bytes.subarray(end - length, end) })
-          : Result.isSuccess(decoded)
-          ? decoded.success
-          : reader.fail(decoded.failure.message)
         if (reader.offset !== end) reader.fail("record data does not match its length")
+        // Data that `Dns` cannot represent is kept undecoded, like unknown types.
+        const data = decoded !== undefined && Result.isSuccess(decoded)
+          ? decoded.success
+          : Dns.makeUnknownRecordUnsafe({ type, data: reader.bytes.subarray(end - length, end) })
         records.push({
           owner,
           ttl: Duration.seconds(ttl > 0x7fffffff ? 0 : ttl),

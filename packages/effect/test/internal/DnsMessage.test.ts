@@ -377,6 +377,38 @@ describe("DnsMessage", () => {
       assert.deepStrictEqual(record.data, Dns.makeUnknownRecordUnsafe({ type: 0xff00, data: hex("01") }))
     })
 
+    it("keeps record data that Dns cannot represent as undecoded data", () => {
+      for (
+        const [type, data] of [
+          [0x0101, "00 02 612d 62"], // CAA tag that is not alphanumeric
+          [0x0101, "00 02 6180 62"], // CAA tag that is not ASCII
+          [0x0010, ""], // TXT without character strings
+          [0x0034, "030101"], // TLSA without data
+          [0x0002, "05 636166c3a9 00"], // NS host "café"
+          [0x000f, "000a 06 6d61696c 2031 00"] // MX exchange "mail 1"
+        ] as const
+      ) {
+        const length = hex(data).length.toString(16).padStart(4, "0")
+        const message = hex(
+          `0000 8000 0000 0001 0000 0000 01 61 00 ${type.toString(16).padStart(4, "0")} 0001 00000001 ${length} ${data}`
+        )
+        assert.deepStrictEqual(decode(message).answer[0].data, Dns.makeUnknownRecordUnsafe({ type, data: hex(data) }))
+      }
+    })
+
+    it("keeps the answers when other sections have data that Dns cannot represent", () => {
+      const message = hex(`
+        0000 8000 0000 0001 0001 0001
+        01 61 00 0001 0001 00000001 0004 c0000201
+        01 61 00 0006 0001 00000001 001c 012a 01 61 00 01 68 00 00000001 00000001 00000001 00000001 00000001
+        01 61 00 0002 0001 00000001 0006 042d626164 00
+      `)
+      const response = decode(message)
+      assert.deepStrictEqual(response.answer.map((record) => String(record.data)), ["A 192.0.2.1"])
+      assert.deepStrictEqual(response.authority.map((record) => record.data._tag), ["UNKNOWN"])
+      assert.deepStrictEqual(response.additional.map((record) => record.data._tag), ["UNKNOWN"])
+    })
+
     it("treats TTLs of 2^31 seconds or more as zero", () => {
       const message = hex(`0000 8000 0000 0001 0000 0000 01 61 00 0001 0001 80000000 0004 c0000201`)
       assert.deepStrictEqual(decode(message).answer[0].ttl, Duration.seconds(0))
@@ -449,21 +481,6 @@ describe("DnsMessage", () => {
         ),
         /question name is longer than 255 bytes/
       )
-    })
-
-    it("rejects record data that Dns cannot represent", () => {
-      for (
-        const [data, expected] of [
-          ["0101 0001 00000001 0005 00 02 612d 62", "invalid CAA record tag"], // tag that is not alphanumeric
-          ["0101 0001 00000001 0005 00 02 6180 62", "invalid CAA record tag"], // tag that is not ASCII
-          ["0010 0001 00000001 0000", "invalid TXT record chunks"], // no character strings
-          ["0034 0001 00000001 0003 030101", "invalid TLSA record data"], // no data
-          ["0002 0001 00000001 0007 05 636166c3a9 00", "invalid NS record host"], // UTF-8 "café"
-          ["000f 0001 00000001 000a 000a 06 6d61696c 2031 00", "invalid MX record exchange"] // "mail 1"
-        ]
-      ) {
-        assert.strictEqual(decodeError(hex(`0000 8000 0000 0001 0000 0000 01 61 00 ${data}`)), expected)
-      }
     })
 
     it("rejects record data that does not match its length", () => {

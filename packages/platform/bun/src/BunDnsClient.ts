@@ -35,8 +35,8 @@ const tcp = (server: NetAddress.InetAddress) =>
   NodeSocket.makeNet({ host: NetAddress.formatIp(server.address), port: server.port })
 
 /**
- * Creates a `DnsClient.Transport` that sends queries over UDP with
- * Bun UDP sockets connected to the name server, and retries truncated responses over
+ * Creates a `DnsClient.Transport` that sends queries over UDP with Bun UDP
+ * sockets connected to the name server, and retries truncated responses over
  * `node:net` connections.
  *
  * @see {@link layerTransportUdp} for a layer

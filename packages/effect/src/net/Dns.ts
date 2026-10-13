@@ -238,8 +238,8 @@ export interface Txt extends RecordProto<"TXT"> {
 }
 
 /**
- * A record of a type without its own record value, with its numeric type and
- * undecoded data.
+ * A record with its numeric type and undecoded data, for types without their
+ * own record value and for data that its type cannot represent.
  *
  * @stability experimental
  * @category models

@@ -14,10 +14,12 @@ import * as Duration from "../Duration.ts"
 import * as Effect from "../Effect.ts"
 import * as Base64Url from "../encoding/Base64Url.ts"
 import * as Equal from "../Equal.ts"
+import * as FetchHttpClient from "../http/FetchHttpClient.ts"
 import * as HttpClient from "../http/HttpClient.ts"
 import * as HttpClientRequest from "../http/HttpClientRequest.ts"
 import * as DnsMessage from "../internal/dnsMessage.ts"
 import * as Layer from "../Layer.ts"
+import * as Option from "../Option.ts"
 import * as Result from "../Result.ts"
 import type * as Scope from "../Scope.ts"
 import type * as DatagramSocket from "../socket/DatagramSocket.ts"
@@ -155,7 +157,8 @@ const concat = (head: Uint8Array, chunks: ReadonlyArray<Uint8Array>): Uint8Array
  *
  * - `encode` encodes the query with an ID and EDNS(0) options.
  * - `matches` returns whether a message is a response to the query.
- * - `limit` scopes one exchange and applies the client's timeout.
+ * - `limit` scopes one exchange, applies the client's timeout, and reports
+ *   other failures as `Temporary`.
  * - `fail` creates the `Dns.DnsError` of the query.
  *
  * @stability experimental
@@ -229,11 +232,19 @@ export const makeTransportTcp = (
             const pull = yield* Socket.readerBytes(socket)
             const writer = yield* socket.writer
             yield* writer.write(tcpFrame(encode({ id, udpPayloadSize: 1232 })))
-            let buffer: Uint8Array = new Uint8Array(0)
-            while (buffer.length < 2 || buffer.length < 2 + ((buffer[0] << 8) | buffer[1])) {
-              buffer = concat(buffer, yield* pull)
+            let prefix: Uint8Array = new Uint8Array(0)
+            while (prefix.length < 2) prefix = concat(prefix, yield* pull)
+            const message = new Uint8Array((prefix[0] << 8) | prefix[1])
+            let length = Math.min(prefix.length - 2, message.length)
+            message.set(prefix.subarray(2, 2 + length))
+            while (length < message.length) {
+              for (const chunk of yield* pull) {
+                const part = chunk.subarray(0, message.length - length)
+                message.set(part, length)
+                length += part.length
+              }
             }
-            return buffer.subarray(2, 2 + ((buffer[0] << 8) | buffer[1]))
+            return message
           }))
           if (!matches(payload, id)) {
             return yield* fail("InvalidResponse", new Error("the TCP response does not match the query"))
@@ -312,10 +323,10 @@ export const makeTransportUdp = (
  *
  * **Details**
  *
- * `method` defaults to `"GET"`. `http:` URLs are accepted only for loopback
- * hosts. `transformClient` customizes the `HttpClient`, such as to add
- * headers. Status codes and retries are handled by the transport and
- * `DnsClient`.
+ * `method` defaults to `"GET"`. `http:` URLs are accepted only for `localhost`
+ * and loopback addresses, and redirects are not followed. `transformClient`
+ * customizes the `HttpClient`, such as to add headers. Status codes and
+ * retries are handled by the transport and `DnsClient`.
  *
  * @stability experimental
  * @category models
@@ -332,7 +343,7 @@ const dnsMessage = "application/dns-message"
 const maxMessageSize = 0xffff
 
 const isLoopbackHost = (hostname: string): boolean => {
-  if (hostname === "localhost" || hostname.endsWith(".localhost")) return true
+  if (hostname === "localhost") return true
   const address = Result.getOrUndefined(NetAddress.ipFromString(hostname.replace(/^\[(.*)\]$/, "$1")))
   return address !== undefined && NetAddress.isLoopback(address)
 }
@@ -350,7 +361,8 @@ const isLoopbackHost = (hostname: string): boolean => {
 export const makeTransportHttps = (
   options: TransportHttpsOptions
 ): Effect.Effect<Transport["Service"], never, HttpClient.HttpClient> =>
-  Effect.map(Effect.service(HttpClient.HttpClient), (httpClient) => {
+  Effect.gen(function*() {
+    const httpClient = yield* HttpClient.HttpClient
     if (options.urls.length === 0) {
       throw new RangeError("DnsClient needs at least one URL")
     }
@@ -375,11 +387,15 @@ export const makeTransportHttps = (
             "accept",
             dnsMessage
           )
+          // `fetch` follows redirects by default, which could leave HTTPS.
+          const requestInit = Option.getOrUndefined(yield* Effect.serviceOption(FetchHttpClient.RequestInit))
           const payload = yield* limit(Effect.gen(function*() {
-            const response = yield* client.execute(request)
+            const response = yield* client.execute(request).pipe(
+              Effect.provideService(FetchHttpClient.RequestInit, { ...requestInit, redirect: "manual" })
+            )
             if (response.status < 200 || response.status >= 300) {
               return yield* fail(
-                response.status >= 500 ? "ServerFailure" : "InvalidResponse",
+                response.status >= 500 ? "ServerFailure" : response.status === 429 ? "Temporary" : "InvalidResponse",
                 new Error(`the server responded with status ${response.status}`)
               )
             }
@@ -472,7 +488,8 @@ export interface MakeOptions {
  * @since 4.0.0
  */
 export const make = (options: MakeOptions = {}): Effect.Effect<DnsClient["Service"], never, Transport> =>
-  Effect.map(Effect.service(Transport), (transport) => {
+  Effect.gen(function*() {
+    const { servers } = yield* Transport
     const timeout = Duration.fromInputUnsafe(options.timeout ?? Duration.seconds(5))
     const attempts = options.attempts ?? 2
     if (!Duration.isFinite(timeout) || !Duration.isPositive(timeout)) {
@@ -486,7 +503,6 @@ export const make = (options: MakeOptions = {}): Effect.Effect<DnsClient["Servic
       throw new RangeError(`DnsClient ndots must be a non-negative integer, received ${ndots}`)
     }
     const search = Arr.map(options.search ?? [], (domain) => Host.domainNameFromStringUnsafe(domain))
-    const { servers } = transport
     let rotation = 0
 
     const query = Effect.fnUntraced(function*(
@@ -526,7 +542,7 @@ export const make = (options: MakeOptions = {}): Effect.Effect<DnsClient["Servic
         limit: (effect) =>
           effect.pipe(
             Effect.scoped,
-            Effect.mapError((cause) => cause instanceof Dns.DnsError ? cause : fail("Refused", cause)),
+            Effect.mapError((cause) => cause instanceof Dns.DnsError ? cause : fail("Temporary", cause)),
             Effect.timeoutOrElse({ duration: timeout, orElse: () => Effect.fail(fail("Timeout")) })
           ),
         fail
@@ -542,7 +558,8 @@ export const make = (options: MakeOptions = {}): Effect.Effect<DnsClient["Servic
         if (response.rcode !== 0 && response.rcode !== 3) {
           return yield* fail(rcodeReasons[response.rcode] ?? "Unknown", response)
         }
-        // A referral from a server without recursion, skipped like glibc and Go.
+        // A referral from a server without recursion. Unlike Go, an echoed OPT
+        // record does not count as additional data.
         if (
           recursionDesired && response.rcode === 0 && !response.flags.authoritative &&
           !response.flags.recursionAvailable && response.answer.length === 0 && response.additional.length === 0
@@ -723,7 +740,7 @@ const queryName = (target: string): Host.DomainName | undefined =>
  * loopback addresses. Other names are queried as A and AAAA records with the
  * `search` domains and `ndots`, like a stub resolver. Queries follow up to 8
  * CNAME records, querying a target that a response leaves unresolved unless
- * the response is negative.
+ * the response is negative or the target is not a host name.
  *
  * @stability experimental
  * @category layers
@@ -752,7 +769,9 @@ export const layerDns: Layer.Layer<Dns.Dns, never, DnsClient> = Layer.effect(
       Effect.flatMap(client.query(name, type), (response) => {
         let owner: string = Host.toFullyQualified(name)
         for (let hops = 0; hops <= aliases; hops++) {
-          const atOwner = response.answer.filter((record) => asciiLowerCase(record.owner) === owner)
+          const atOwner = response.answer.filter((record) =>
+            record.class === 1 && asciiLowerCase(record.owner) === owner
+          )
           const records = atOwner.flatMap((record) =>
             record.data._tag === type ? [record.data as Dns.RecordFor<T>] : []
           )
