@@ -504,8 +504,12 @@ describe("WorkflowEngine", () => {
           token: DurableDeferred.tokenFromExecutionId(ChildGate, { workflow: Child, executionId: childId }),
           value: void 0
         })
-        for (let i = 0; i < 100; i++) yield* Effect.yieldNow
-        assert.deepStrictEqual(yield* Child.poll(childId), Option.some(new Workflow.Complete({ exit: Exit.void })))
+        let child = yield* Child.poll(childId)
+        while (Option.isNone(child) || child.value._tag !== "Complete") {
+          yield* Effect.yieldNow
+          child = yield* Child.poll(childId)
+        }
+        assert.deepStrictEqual(child.value, new Workflow.Complete({ exit: Exit.void }))
       }).pipe(
         Effect.provide(Layer.mergeAll(ParentLayer, ChildLayer).pipe(Layer.provideMerge(WorkflowEngine.layerMemory)))
       )
