@@ -463,6 +463,8 @@ describe("WorkflowEngine", () => {
         for (let i = 0; i < 100; i++) yield* Effect.yieldNow
         assert.strictEqual(failures, 2, "the explicit resume must replay the failed activity")
       }).pipe(Effect.provide(FailingLayer.pipe(Layer.provideMerge(WorkflowEngine.layerMemory))))
+    }))
+
   it.effect("layerMemory does not interrupt a detached child with its parent", () =>
     Effect.gen(function*() {
       const ParentGate = DurableDeferred.make("WorkflowEngine/DetachedParentGate")
