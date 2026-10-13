@@ -78,11 +78,29 @@ export interface Workflow<
 
   /**
    * Execute the workflow with the given payload.
+   *
+   * **Details**
+   *
+   * With `discard: true`, the execution is started and its execution ID is
+   * returned without waiting for the result. Started from inside another
+   * workflow, a discarded execution still records that workflow as its parent:
+   * its completion wakes the parent, and interrupting the parent interrupts it.
+   *
+   * Add `detached: true` to fire and forget. The parent is still recorded for
+   * observability, but the execution never wakes the parent and is not
+   * interrupted with it. `detached` is only accepted alongside `discard: true`.
+   *
+   * **Gotchas**
+   *
+   * A detached execution cannot be awaited later. Executions are deduplicated by
+   * execution ID, so a later `execute` of the same payload joins the detached
+   * execution, and its completion will not wake the awaiting workflow.
    */
   readonly execute: <const Discard extends boolean = false>(
     payload: Payload["~type.make.in"],
     options?: {
       readonly discard?: Discard
+      readonly detached?: [Discard] extends [true] ? boolean | undefined : undefined
     }
   ) => Effect.Effect<
     Discard extends true ? string : Success["Type"],
@@ -248,7 +266,7 @@ export interface AnyWithProps extends Any {
   readonly errorSchema: Schema.Top
   readonly execute: (
     payload: any,
-    options?: { readonly discard?: boolean }
+    options?: { readonly discard?: boolean; readonly detached?: boolean | undefined }
   ) => Effect.Effect<any, any, any>
   readonly resume: (
     executionId: string
@@ -352,7 +370,7 @@ const Proto = {
   execute<const Discard extends boolean = false>(
     this: AnyWithProps,
     fields: any,
-    opts?: { readonly discard?: Discard } | undefined
+    opts?: { readonly discard?: Discard; readonly detached?: boolean | undefined } | undefined
   ) {
     return Effect.suspend(() => {
       const payload = this.payloadSchema.make(fields)
@@ -366,6 +384,7 @@ const Proto = {
                 executionId,
                 payload,
                 discard: opts?.discard,
+                detached: opts?.detached,
                 suspendedRetrySchedule: this.suspendedRetrySchedule
               })
             ))
