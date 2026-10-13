@@ -1,13 +1,14 @@
 /**
  * Node.js implementation of the `DnsClient` service and its UDP and TCP
- * transports, configured from `/etc/resolv.conf` and the hosts file.
+ * transports, configured from `/etc/resolv.conf` and the hosts file. On
+ * Windows, the name servers are those of `node:dns`.
  *
  * @stability experimental
  * @since 4.0.0
  */
 import * as Arr from "effect/Array"
 import * as Config from "effect/Config"
-import type * as Duration from "effect/Duration"
+import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
@@ -15,6 +16,7 @@ import * as Dns from "effect/net/Dns"
 import * as DnsClient from "effect/net/DnsClient"
 import * as Host from "effect/net/Host"
 import * as NetAddress from "effect/net/NetAddress"
+import * as NodeDnsApi from "node:dns"
 import * as NodeCrypto from "./NodeCrypto.ts"
 import * as NodeDatagramSocket from "./NodeDatagramSocket.ts"
 import * as NodeFileSystem from "./NodeFileSystem.ts"
@@ -65,15 +67,38 @@ export const checkNameServers = Effect.fnUntraced(function*(
   }
 })
 
-const hostsPath = typeof process !== "undefined" && process.platform === "win32"
+const isWindows = typeof process !== "undefined" && process.platform === "win32"
+
+const hostsPath = isWindows
   ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\drivers\\etc\\hosts`
   : "/etc/hosts"
+
+// Windows has no resolv.conf; `node:dns` reads the adapters' name servers.
+const windowsNameServers = (): ReadonlyArray<NetAddress.InetAddress> => {
+  try {
+    return Arr.filterMap(NodeDnsApi.getServers(), Dns.nameServerFromString)
+  } catch {
+    return []
+  }
+}
+
+// Clamps numeric options to their valid ranges, like `NodeDns`; NaN becomes
+// the minimum.
+const clamp = (value: number | undefined, min: number, max: number): number | undefined =>
+  value === undefined ? undefined : value >= min ? Math.min(Math.floor(value), max) : min
+
+const clampTimeout = (input: Duration.Input | undefined): Duration.Duration | undefined => {
+  if (input === undefined) return undefined
+  const millis = Duration.toMillis(input)
+  return Duration.millis(millis >= 1 ? Math.min(millis, 2 ** 31 - 1) : 1)
+}
 
 const localNameServers = Arr.map(NetAddress.loopbackAddresses, (address) => NetAddress.inetAddressUnsafe(address, 53))
 
 /**
  * Reads the system resolver configuration and hosts file with the
- * `FileSystem` service and combines them with options.
+ * `FileSystem` service and combines them with options. Numeric options are
+ * clamped to their valid ranges, and `ndots` to 15 like in `resolv.conf`.
  *
  * @stability experimental
  * @category constructors
@@ -87,8 +112,8 @@ export const systemOptions = Effect.fnUntraced(function*(options?: Options) {
   const search = options?.search === undefined
     ? undefined
     : yield* Effect.forEach(options.search, (domain) => Effect.fromResult(Host.domainNameFromString(domain)))
-  const config = DnsClient.parseResolvConf(yield* readFile("/etc/resolv.conf"))
-  const system = config.nameServers.filter((server) => !isScoped(server))
+  const config = DnsClient.parseResolvConf(isWindows ? "" : yield* readFile("/etc/resolv.conf"))
+  const system = (isWindows ? windowsNameServers() : config.nameServers).filter((server) => !isScoped(server))
   const hosts = yield* Effect.cachedWithTTL(Effect.map(readFile(hostsPath), Host.parseHostsFile), "5 seconds")
   const combined: DnsClient.MakeOptions & Omit<DnsClient.TransportUdpOptions, "udp" | "tcp"> & {
     readonly useTcp: boolean
@@ -99,13 +124,13 @@ export const systemOptions = Effect.fnUntraced(function*(options?: Options) {
       ? system
       : localNameServers,
     search: search ?? config.search,
-    ndots: options?.ndots ?? config.ndots,
-    timeout: options?.timeout ?? config.timeout,
-    attempts: options?.attempts ?? config.attempts,
+    ndots: clamp(options?.ndots, 0, 15) ?? config.ndots,
+    timeout: clampTimeout(options?.timeout) ?? config.timeout,
+    attempts: clamp(options?.attempts, 1, Number.MAX_SAFE_INTEGER) ?? config.attempts,
     rotate: options?.rotate ?? config.rotate,
     useTcp: options?.useTcp ?? config.useTcp ?? false,
     noAaaa: options?.noAaaa ?? config.noAaaa,
-    udpPayloadSize: options?.udpPayloadSize,
+    udpPayloadSize: clamp(options?.udpPayloadSize, 512, 0xffff),
     hosts
   }
   return combined

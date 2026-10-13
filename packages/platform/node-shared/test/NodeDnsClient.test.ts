@@ -72,6 +72,25 @@ describe("NodeDnsClient", () => {
       assert.deepStrictEqual(hosts.get("db" as never)?.map(NetAddress.formatIp), ["192.0.2.9"])
     }))
 
+  it.effect("clamps numeric options to their valid ranges", () =>
+    Effect.gen(function*() {
+      const clamped = yield* NodeDnsClient.systemOptions({
+        ndots: 20,
+        attempts: 0,
+        timeout: Duration.zero,
+        udpPayloadSize: 100
+      }).pipe(Effect.provide(files({})))
+      assert.deepStrictEqual(
+        [clamped.ndots, clamped.attempts, clamped.timeout, clamped.udpPayloadSize],
+        [15, 1, Duration.millis(1), 512]
+      )
+      const rounded = yield* NodeDnsClient.systemOptions({ ndots: 1.5, attempts: Number.NaN, udpPayloadSize: 1e6 })
+        .pipe(Effect.provide(files({})))
+      assert.deepStrictEqual([rounded.ndots, rounded.attempts, rounded.udpPayloadSize], [1, 1, 0xffff])
+      // The clamped options are accepted by the transports and the client.
+      yield* NodeDnsClient.make({ nameServers: ["192.0.2.53"], ndots: -1, attempts: 0, timeout: Duration.zero })
+    }))
+
   it.effect("uses the local name servers when the files are missing", () =>
     Effect.gen(function*() {
       const config = yield* NodeDnsClient.systemOptions().pipe(Effect.provide(files({})))
