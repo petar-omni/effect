@@ -1,5 +1,23 @@
 # effect
 
+## 4.0.5
+
+### Patch Changes
+
+- [#9105](https://github.com/Effect-TS/effect/pull/9105) [`74d1930`](https://github.com/Effect-TS/effect/commit/74d19304da077d98cc6dcb294c71e253365f272f) Thanks @tim-smart! - Fix infinite atom rebuilds caused by late reads of uninitialized dependencies.
+
+- [#9094](https://github.com/Effect-TS/effect/pull/9094) [`5d301cc`](https://github.com/Effect-TS/effect/commit/5d301cc7aaf23e40cc8b59feea9389f747048d02) Thanks @okxint! - Name cluster entity RPC server spans by entity type only (e.g. `WorkflowEntity.Run`) so span names stay low-cardinality. The entity ID is still recorded in the `entity.id` span attribute.
+
+- [#9095](https://github.com/Effect-TS/effect/pull/9095) [`925cf64`](https://github.com/Effect-TS/effect/commit/925cf641c7070140541aef0d6a7fe6b545f9da23) Thanks @jayhemnani9910! - Fix `ConfigProvider.fromDotEnv` and `fromDotEnvContents` rescanning expanded values when `expandVariables` is enabled. Self and circular references no longer overflow the stack, escaped `\$NAME` stays literal, and defaults apply when a reference expands to an empty value.
+
+- [#9098](https://github.com/Effect-TS/effect/pull/9098) [`91efea7`](https://github.com/Effect-TS/effect/commit/91efea7860bbb42bd53cd76059538c44fada3217) Thanks @armancharan! - Narrow only the matched prefix when a `Match` tuple pattern is applied to an array or variadic tuple, so the remaining elements keep their original type.
+
+- [#9088](https://github.com/Effect-TS/effect/pull/9088) [`352618a`](https://github.com/Effect-TS/effect/commit/352618a562d6f5693e6255a3dcc0c15929c01d88) Thanks @armancharan! - `Match.when`, `Match.whenOr`, `Match.whenAnd`, and `Match.not` now reject object patterns with keys the input type does not have.
+
+- [#9103](https://github.com/Effect-TS/effect/pull/9103) [`dba4e52`](https://github.com/Effect-TS/effect/commit/dba4e52f505e10730623a7610413156d82fee6fe) Thanks @gcanti! - Reject duplicate discriminants at compile time in `Schema.toTaggedUnion`, including duplicates in nested unions and numeric/string property-key collisions such as `1` and `"1"`.
+
+- [#9096](https://github.com/Effect-TS/effect/pull/9096) [`7ca8224`](https://github.com/Effect-TS/effect/commit/7ca8224ebb87a603f7a3eaee7470537067fe2bc0) Thanks @jayhemnani9910! - Fix `Sse.encoder` dropping event data after a lone `\r`. CR and CRLF line endings in event data now start a new `data:` line, like LF.
+
 ## 4.0.4
 
 ### Patch Changes
