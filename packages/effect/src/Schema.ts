@@ -14183,8 +14183,7 @@ export interface DnsUnknownRecord extends declare<Dns_.Unknown> {
 }
 
 /**
- * Schema for already-constructed DNS records of a type without its own record
- * value.
+ * Schema for already-constructed `Dns.Unknown` records.
  *
  * @stability experimental
  * @category schemas
@@ -14255,6 +14254,51 @@ export const DnsRecord: DnsRecord = Union([
   DnsTlsaRecord,
   DnsTxtRecord
 ]).annotate({ identifier: "DnsRecord" })
+
+// TTLs are written as whole seconds, like SOA timers.
+const dnsTtl = Duration.annotate({
+  toCodecJson: () =>
+    link<Duration_.Duration>()(
+      dnsUint32,
+      SchemaTransformation.transform({ decode: Duration_.seconds, encode: Duration_.toSeconds })
+    )
+})
+
+/**
+ * Type-level representation of {@link DnsResourceRecord}.
+ *
+ * @stability experimental
+ * @category models
+ * @since 4.0.0
+ */
+export interface DnsResourceRecord extends
+  Struct<{
+    readonly owner: NonEmptyString
+    readonly ttl: Duration
+    readonly class: Int
+    readonly data: Union<readonly [DnsRecord, DnsUnknownRecord]>
+  }>
+{}
+
+/**
+ * Schema for resource records of `DnsClient` responses.
+ *
+ * **Details**
+ *
+ * The default JSON serializer encodes the TTL as whole seconds and the record
+ * data like {@link DnsRecord} and {@link DnsUnknownRecord}, such as
+ * `{ "owner": "example.com.", "ttl": 300, "class": 1, "data": { "_tag": "A", "address": "192.0.2.1" } }`.
+ *
+ * @stability experimental
+ * @category schemas
+ * @since 4.0.0
+ */
+export const DnsResourceRecord: DnsResourceRecord = Struct({
+  owner: NonEmptyString,
+  ttl: dnsTtl,
+  class: dnsUint16,
+  data: Union([DnsRecord, DnsUnknownRecord])
+}).annotate({ identifier: "DnsResourceRecord" })
 
 // -----------------------------------------------------------------------------
 // Exit schemas

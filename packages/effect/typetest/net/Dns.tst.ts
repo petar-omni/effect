@@ -1,6 +1,7 @@
-import { Effect } from "effect"
+import { Effect, type Schema } from "effect"
 import type * as Arr from "effect/Array"
 import * as Dns from "effect/net/Dns"
+import type * as DnsClient from "effect/net/DnsClient"
 import type * as Host from "effect/net/Host"
 import type * as NetAddress from "effect/net/NetAddress"
 import { describe, expect, it } from "tstyche"
@@ -51,5 +52,10 @@ describe("Dns", () => {
     expect<Dns.Unknown>().type.not.toBeAssignableTo<Dns.DnsRecord>()
     expect(Dns.makeRecord).type.not.toBeCallableWith("UNKNOWN", { type: 65280, data: new Uint8Array() })
     expect(dns.resolve).type.not.toBeCallableWith("example.com", "UNKNOWN")
+  })
+
+  it("types DnsResourceRecord as DnsClient.ResourceRecord", () => {
+    expect<typeof Schema.DnsResourceRecord.Type>().type.toBeAssignableTo<DnsClient.ResourceRecord>()
+    expect<DnsClient.ResourceRecord>().type.toBeAssignableTo<typeof Schema.DnsResourceRecord.Type>()
   })
 })

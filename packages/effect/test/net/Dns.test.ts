@@ -134,6 +134,27 @@ describe("Dns", () => {
       assert.throws(() => Schema.decodeUnknownSync(unknownCodec)({ ...unknownJson, type: 0x10000 }))
       assert.throws(() => Schema.decodeUnknownSync(codec)(unknownJson))
     })
+
+    it("encodes and decodes resource records as JSON", () => {
+      const codec = Schema.toCodecJson(Schema.DnsResourceRecord)
+      const a = {
+        owner: "example.com.",
+        ttl: Duration.seconds(300),
+        class: 1,
+        data: Dns.makeRecordUnsafe("A", { address: ip("192.0.2.1") as NetAddress.Ipv4Address })
+      }
+      const json = { owner: "example.com.", ttl: 300, class: 1, data: { _tag: "A", address: "192.0.2.1" } }
+      assert.deepStrictEqual(Schema.encodeSync(codec)(a), json)
+      assert.isTrue(Equal.equals(Schema.decodeUnknownSync(codec)(json), a))
+      const unknown = { ...a, data: Dns.makeUnknownRecordUnsafe({ type: 65280, data: new Uint8Array([0x0a]) }) }
+      const unknownJson = { ...json, data: { _tag: "UNKNOWN", type: 65280, data: "0a" } }
+      assert.deepStrictEqual(Schema.encodeSync(codec)(unknown), unknownJson)
+      assert.isTrue(Equal.equals(Schema.decodeUnknownSync(codec)(unknownJson), unknown))
+      assert.throws(() => Schema.decodeUnknownSync(codec)({ ...json, ttl: 1.5 }))
+      assert.throws(() => Schema.decodeUnknownSync(codec)({ ...json, class: 0x10000 }))
+      assert.throws(() => Schema.decodeUnknownSync(codec)({ ...json, owner: "" }))
+      assert.throws(() => Schema.encodeSync(codec)({ ...a, ttl: Duration.millis(1500) }))
+    })
   })
 
   describe("service", () => {
