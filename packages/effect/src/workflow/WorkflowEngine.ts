@@ -85,9 +85,8 @@ export class WorkflowEngine extends Context.Service<
      * sooner. `ClusterWorkflowEngine` does so only for callers on the runner
      * that owns the execution.
      *
-     * With `detached` (only valid alongside `discard`), an execution started
-     * inside another workflow neither wakes nor is interrupted with that
-     * workflow. Setting `detached` without `discard` is a defect.
+     * `detached: true` requires `discard: true` and skips parent completion
+     * wakes and interruption linkage. Otherwise, it is a defect.
      */
     readonly execute: <
       Name extends string,
@@ -418,7 +417,7 @@ export interface Encoded {
       readonly payload: object
       readonly discard: Discard
       readonly parent?: WorkflowInstance["Service"] | undefined
-      /** The parent is recorded, but is neither woken nor interrupt-linked. */
+      /** Skip parent completion wakes and interruption linkage. */
       readonly detached?: boolean | undefined
     }
   ) => Effect.Effect<
@@ -838,7 +837,6 @@ export const layerMemory: Layer.Layer<WorkflowEngine> = Layer.effect(WorkflowEng
             resumeRequested: undefined,
             fiber: undefined,
             done: Deferred.makeUnsafe(),
-            // In memory, a detached child has nothing to record its parent for.
             parent: options.detached ? undefined : options.parent?.executionId
           }
           executions.set(options.executionId, state)

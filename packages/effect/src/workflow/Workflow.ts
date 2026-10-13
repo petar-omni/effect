@@ -81,20 +81,17 @@ export interface Workflow<
    *
    * **Details**
    *
-   * With `discard: true`, the execution is started and its execution ID is
-   * returned without waiting for the result. Started from inside another
-   * workflow, a discarded execution still records that workflow as its parent:
-   * its completion wakes the parent, and interrupting the parent interrupts it.
+   * `discard: true` returns the execution ID without waiting for the result.
+   * The child remains linked to its parent for completion wakes and interruption.
    *
-   * Add `detached: true` to fire and forget. The parent is still recorded for
-   * observability, but the execution never wakes the parent and is not
-   * interrupted with it. `detached` is only accepted alongside `discard: true`.
+   * With `discard: true, detached: true`, the child neither wakes its parent
+   * nor gets interrupted with it. The cluster engine retains the parent for
+   * observability.
    *
    * **Gotchas**
    *
-   * A detached execution cannot be awaited later. Executions are deduplicated by
-   * execution ID, so a later `execute` of the same payload joins the detached
-   * execution, and its completion will not wake the awaiting workflow.
+   * Do not await a detached execution later. Executing the same payload joins
+   * it, but its completion will not wake the awaiting workflow.
    */
   readonly execute: <const Discard extends boolean = false>(
     payload: Payload["~type.make.in"],
