@@ -1387,6 +1387,18 @@ describe("layerDns", () => {
       assert.strictEqual(error.recordType, "PTR")
     }))
 
+  it.effect("fails when no record of the queried type can be represented", () =>
+    Effect.gen(function*() {
+      const bad = Dns.makeUnknownRecordUnsafe({ type: 12, data: Uint8Array.of(0xff) })
+      const { dns } = staticClient({
+        records: { "example.test.": [ptr("good.example.test."), bad], "other.test.": [bad] }
+      })
+      assert.deepStrictEqual(yield* (yield* dns).resolve(name("example.test"), "PTR"), [ptr("good.example.test.")])
+      const error = yield* Effect.flip((yield* dns).resolve(name("other.test"), "PTR"))
+      assert.strictEqual(error.reason, "InvalidResponse")
+      assert.strictEqual(error.recordType, "PTR")
+    }))
+
   it.effect("returns CNAME records when they are queried", () =>
     Effect.gen(function*() {
       const { dns } = staticClient({

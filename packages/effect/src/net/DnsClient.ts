@@ -776,6 +776,20 @@ export const layerDns: Layer.Layer<Dns.Dns, never, DnsClient> = Layer.effect(
             record.data._tag === type ? [record.data as Dns.RecordFor<T>] : []
           )
           if (records.length > 0) return Effect.succeed(records)
+          // Records of the type whose data `Dns` cannot represent.
+          if (
+            atOwner.some((record) => record.data._tag === "UNKNOWN" && record.data.type === DnsMessage.typeCodes[type])
+          ) {
+            return Effect.fail(
+              new Dns.DnsError({
+                reason: "InvalidResponse",
+                method: "resolve",
+                hostname: name,
+                recordType: type,
+                cause: new Error(`no ${type} record can be represented`)
+              })
+            )
+          }
           const alias = atOwner.find((record) => record.data._tag === "CNAME")?.data as Dns.Cname | undefined
           if (alias === undefined) {
             // NXDOMAIN, or NODATA with the SOA record of the target's zone (RFC 2308).
